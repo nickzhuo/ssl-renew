@@ -546,6 +546,28 @@ process_cert() {
       SUMMARY+=("${primary}|${newend:-—}|${newrem}|${renew}|失败")
       return 1
     fi
+    # ---- 检查证书是不是从 Let's Encrypt 测试环境签出来的 ----
+    # 2026-11-11 加。背景：www.dudianjian.com / .cn 的证书连续几个月都是
+    # STAGING 环境签发的（issuer 带 "(STAGING)" 字样），浏览器不信任、
+    # curl 报 exit=60，但脚本只校验剩余天数，全程没有任何告警，
+    # 直到用户发现打不开才暴露。这条检查把这种问题挡在部署之后立刻发现。
+    local issuer
+    issuer="$(openssl x509 -in "${outdir}/${prefix}cert.pem" -noout -issuer 2>/dev/null || true)"
+    if printf '%s' "$issuer" | grep -qi 'STAGING'; then
+      if [ "$STAGING" = 1 ]; then
+        warn "证书来自 STAGING 测试环境（本次显式用了 --staging，属预期）"
+      else
+        warn "证书来自 Let's Encrypt STAGING 测试环境，浏览器/客户端不会信任！"
+        warn "   issuer: ${issuer#issuer=}"
+        warn "   检查是否误加了 --staging，或 acme.sh 里残留了测试环境的 CA 配置"
+        record_fail "$primary" "签成了 STAGING 测试证书（浏览器不信任）"
+        SUMMARY+=("${primary}|${newend:-—}|${newrem:-—}|${renew}|失败(STAGING)")
+        return 1
+      fi
+    else
+      ok "证书环境：正式（${issuer#issuer=}）"
+    fi
+
     ok "校验通过：剩余 ${newrem} 天（至 ${newend}）"
   fi
 
