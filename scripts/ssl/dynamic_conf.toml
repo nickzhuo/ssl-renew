@@ -1,0 +1,94 @@
+# dashboard界面
+[http.routers.apissl]
+  rule = "Host(`traefik.91xungou.com`)" # 匹配规则
+  entrypoints = ["websecure"] #界面走443
+  service = "api@internal"
+  middlewares = ["myAuth"]
+  [http.routers.apissl.tls]
+
+[http.routers.api]
+  rule = "Host(`traefik.91xungou.com`)" # 匹配规则
+  entrypoints = ["web"] #界面走443
+  service = "api@internal"
+  middlewares = ["myAuth","https-redirect"]
+
+# 给dashboard准备的密码 nickzhuo 密码：339143
+[http.middlewares.myAuth.basicAuth]
+  users = [
+    "nickzhuo:$apr1$pXCdq8fF$gAzccMinQWHfS7Wi3J5DL1"
+  ]
+
+# http跳https
+[http.middlewares.https-redirect.redirectscheme]
+  scheme = "https"
+
+# =============================================================================
+# 证书配置
+# -----------------------------------------------------------------------------
+# 证书由 scripts/ssl/ssl-issue.sh 自动签发 / 续期，输出到 /root/cert/
+# （ssl.conf 里 SSL_OUTPUT_DIR="/root/cert" + SSL_OUTPUT_LAYOUT="flat"）。
+# 每个域名 4 个文件，Traefik 只用到其中 2 个：
+#
+#   certFile = <域名>.fullchain.pem   叶子证书 + 中间 CA   ← 必须用这个
+#   keyFile  = <域名>.privkey.pem     私钥（权限 600）
+#
+#   ✘ 别用 <域名>.cert.pem   —— 只有叶子证书，缺中间 CA，部分客户端会报"证书链不完整"
+#   ✘ 别用 <域名>.chain.pem  —— 只有中间 CA，没有叶子
+#
+# ★ Traefik 跑在容器里的话，宿主机的 /root/cert/ 必须挂载进容器，
+#   否则容器内看不到这些文件，整份动态配置会加载失败（表现为所有站点证书报错）。
+#   在 docker-compose.yml 的 traefik 服务里加一行：
+#       volumes:
+#         - /root/cert:/root/cert:ro
+#   然后 docker compose up -d traefik 让挂载生效。
+#
+# ★ 权限：宿主上 privkey.pem 是 600 且属主 root。容器里 Traefik 若以非 root
+#   用户运行会读不到私钥（日志报 permission denied）。官方镜像默认 root，通常没问题；
+#   若你改过 user:，需要把宿主的私钥改为容器用户可读。
+# =============================================================================
+[tls]
+  [[tls.certificates]]
+    certFile = "/root/cert/api.91xungou.com.fullchain.pem"
+    keyFile = "/root/cert/api.91xungou.com.privkey.pem"
+  [[tls.certificates]]
+    certFile = "/root/cert/traefik.91xungou.com.fullchain.pem"
+    keyFile = "/root/cert/traefik.91xungou.com.privkey.pem"
+  [[tls.certificates]]
+    certFile = "/root/cert/mysql.91xungou.com.fullchain.pem"
+    keyFile = "/root/cert/mysql.91xungou.com.privkey.pem"
+  [[tls.certificates]]
+    certFile = "/root/cert/www.zhouzhou.net.fullchain.pem"
+    keyFile = "/root/cert/www.zhouzhou.net.privkey.pem"
+  [[tls.certificates]]
+    certFile = "/root/cert/www.91xungou.com.fullchain.pem"
+    keyFile = "/root/cert/www.91xungou.com.privkey.pem"
+  [[tls.certificates]]
+    certFile = "/root/cert/m.91xungou.com.fullchain.pem"
+    keyFile = "/root/cert/m.91xungou.com.privkey.pem"
+  [[tls.certificates]]
+    certFile = "/root/cert/www.b919p4.com.fullchain.pem"
+    keyFile = "/root/cert/www.b919p4.com.privkey.pem"
+  # ---------------------------------------------------------------------------
+  # www.mcskr.com —— 2026-09-18 检查时 /root/cert/ 下还没有这个域名的证书文件，
+  # 先注释掉，避免 Traefik 因为找不到文件导致**整份动态配置**加载失败。
+  # 补签：在 scripts/ssl/domains.conf 里加一行
+  #         www.mcskr.com
+  #       然后跑一次 ./ssl-issue.sh，签完把下面两行的 # 去掉即可。
+  # ---------------------------------------------------------------------------
+  # [[tls.certificates]]
+  #   certFile = "/root/cert/www.mcskr.com.fullchain.pem"
+  #   keyFile = "/root/cert/www.mcskr.com.privkey.pem"
+  [[tls.certificates]]
+    certFile = "/root/cert/www.dudianjian.com.fullchain.pem"
+    keyFile = "/root/cert/www.dudianjian.com.privkey.pem"
+  [[tls.certificates]]
+    certFile = "/root/cert/www.dudianjian.cn.fullchain.pem"
+    keyFile = "/root/cert/www.dudianjian.cn.privkey.pem"
+
+# 默认证书：客户端用 IP 直连或访问未列出的域名时，443 端口兜底用这张。
+# 需要就取消注释（用哪个域名的证书都行，一般是主站）。
+# [tls.stores]
+#   [tls.stores.default]
+#     [tls.stores.default.defaultCertificate]
+#       certFile = "/root/cert/api.91xungou.com.fullchain.pem"
+#       keyFile = "/root/cert/api.91xungou.com.privkey.pem"

@@ -1,0 +1,3 @@
+# 该目录用于存放 SSL 证书，内容已被 .gitignore 排除
+# 完整的证书会在 ssl-issue.sh 执行后生成：
+#   fullchain.pem / privkey.pem / cert.pem / chain.pem

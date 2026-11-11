@@ -1,0 +1,129 @@
+#!/bin/bash
+# =============================================================================
+#  续期后置钩子模板 —— nginx 版
+#  用法：  cp renewpost.sh.example.nginx renewpost.sh && chmod +x renewpost.sh
+#
+#  ★ 这是【服务器本地文件】，按你机器实际情况改，不要提交到 Git。
+#    仓库里只保留 *.example.* 模板，.gitignore 已排除 renewpost.sh，
+#    所以你在服务器上改过的内容不会被后续推送覆盖。
+#
+#  什么时候执行：
+#      ssl-issue.sh 判定某张证书需要签发/续期 → 签发成功 → 部署到证书目录之后。
+#      如果所有证书都还没到期（全部跳过），本脚本不会执行 —— 不会白重启一次 nginx。
+#
+#  为什么不用 ssl.conf 里的 SSL_RELOAD_CMD：
+#      钩子是个完整 shell 脚本，能做"先验配置、再重启、最后校验"这一串动作，
+#      一行命令写不下这些。ssl-issue.sh 会**自动发现**本文件，ssl.conf 不用改。
+#
+#  自测：
+#      bash renewpost.sh --dry-run     # 只打印将要执行的命令，不真跑
+#      bash renewpost.sh               # 手工跑一次验证
+# =============================================================================
+
+set -euo pipefail
+
+# -----------------------------------------------------------------------------
+#  1. 配置区
+# -----------------------------------------------------------------------------
+#  nginx 的 systemd 服务名（绝大多数发行版就是 nginx）
+NGINX_SERVICE="nginx"
+
+#  证书更新后怎么让 nginx 用上新证书：
+#      restart = 完全重启（★ 默认，证书轮换就用它）
+#      reload  = 平滑重载、不断现有连接。原理上 reload 也会重读证书，
+#                但**实测有"看起来没生效"的情况**，两个原因：
+#                  ① 旧 worker 要等手上的长连接（keepalive / WebSocket / 长轮询）
+#                     处理完才退出，worker_shutdown_timeout 默认无限等 ——
+#                     这些残留 worker 手里拿的还是旧证书，新连接落到它们身上就是老证书；
+#                  ② ssl_session_cache 是跨 worker 共享的，reload 不清它，
+#                     老客户端复用会话时根本不做证书交换。
+#                ⇒ **证书轮换请用 restart**（中断通常 < 1 秒，换来的是确定性）。
+#                   确实要零中断再选 reload，但换完必须用下面的方法实测验证：
+#                     echo | openssl s_client -connect <域名>:443 -servername <域名> \
+#                       -no_ticket -no_reuse 2>/dev/null | openssl x509 -noout -dates
+#                   （-no_ticket -no_reuse 强制完整握手，否则会被会话复用骗到）
+NGINX_ACTION="restart"
+
+#  nginx 可执行文件。一般能自动找到；找不到时在这里写绝对路径，例如 "/usr/sbin/nginx"
+NGINX_BIN=""
+
+# -----------------------------------------------------------------------------
+#  2. 参数
+# -----------------------------------------------------------------------------
+DRY_RUN=0
+if [ "${1:-}" = "--dry-run" ]; then DRY_RUN=1; fi
+
+# -----------------------------------------------------------------------------
+#  3. 定位 nginx 命令（systemd 触发时 PATH 是精简的，多兜一层）
+# -----------------------------------------------------------------------------
+find_bin() {
+  local name="$1" p
+  if command -v "$name" >/dev/null 2>&1; then
+    command -v "$name"
+    return 0
+  fi
+  for p in "/usr/sbin/${name}" "/usr/bin/${name}" "/usr/local/sbin/${name}" \
+           "/usr/local/bin/${name}" "/sbin/${name}" "/opt/nginx/sbin/${name}"; do
+    if [ -x "$p" ]; then
+      printf '%s' "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [ -z "$NGINX_BIN" ]; then
+  NGINX_BIN="$(find_bin nginx || true)"
+fi
+if [ -z "$NGINX_BIN" ]; then
+  printf '\n  ✘ 找不到 nginx 可执行文件。\n' >&2
+  printf '    排查：command -v nginx ; ls -l /usr/sbin/nginx\n' >&2
+  printf '    找到后把绝对路径写进本脚本顶部的 NGINX_BIN。\n\n' >&2
+  exit 127
+fi
+printf '  → nginx：%s\n' "$NGINX_BIN"
+
+# -----------------------------------------------------------------------------
+#  4. 先验证配置 —— 这一步会顺带检查所有证书文件能不能读到
+# -----------------------------------------------------------------------------
+#  ★ 顺序很重要：nginx -t 会真正去加载 ssl_certificate / ssl_certificate_key，
+#    证书文件缺失 / 路径写错 / 私钥读不了，这里就会报错。
+#    把它放在重启**之前**，就能在"服务被打断"之前发现问题 ——
+#    否则你会先把 nginx 重启坏，再回头查原因。
+if [ "$DRY_RUN" = 1 ]; then
+  printf '  ✔ dry-run：以下命令不会实际执行\n'
+  printf '  → 将校验：%s -t\n' "$NGINX_BIN"
+  printf '  → 将执行：systemctl %s %s\n' "$NGINX_ACTION" "$NGINX_SERVICE"
+  printf '  → 将检查：systemctl is-active %s\n' "$NGINX_SERVICE"
+  exit 0
+fi
+
+printf '  → 校验配置：%s -t\n' "$NGINX_BIN"
+if ! "$NGINX_BIN" -t; then
+  printf '\n  ✘ nginx 配置校验失败 —— 已中止，**没有**重启 nginx，现有服务不受影响。\n' >&2
+  printf '    常见原因：证书文件不存在 / 路径写错 / 私钥权限不足。\n' >&2
+  printf '    看上面 nginx -t 输出的那一行，它通常会直接指出是哪个文件。\n\n' >&2
+  exit 1
+fi
+printf '  ✔ 配置校验通过（证书路径都读得到）\n'
+
+# -----------------------------------------------------------------------------
+#  5. 让 nginx 加载新证书
+# -----------------------------------------------------------------------------
+printf '  → 执行：systemctl %s %s\n' "$NGINX_ACTION" "$NGINX_SERVICE"
+systemctl "$NGINX_ACTION" "$NGINX_SERVICE"
+
+# -----------------------------------------------------------------------------
+#  6. 校验服务真的起来了
+#  ★ "命令返回 0" 只代表指令发出去了，不代表服务在跑。
+#    证书换了但 nginx 没起来，是最难发现的失败模式 ——
+#    用户的监控看到的是"网站挂了"，根本不会往证书上想。
+# -----------------------------------------------------------------------------
+if ! systemctl is-active --quiet "$NGINX_SERVICE"; then
+  printf '\n  ✘ %s 不是 active 状态 —— 证书是新的，但服务没起来！\n' "$NGINX_SERVICE" >&2
+  systemctl status "$NGINX_SERVICE" --no-pager -l 2>&1 | sed 's/^/    /' >&2 || true
+  printf '\n' >&2
+  exit 1
+fi
+
+printf '  ✔ %s 已 %s 并处于 active 状态，新证书已生效\n' "$NGINX_SERVICE" "$NGINX_ACTION"

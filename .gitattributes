@@ -1,0 +1,60 @@
+# =============================================================================
+#  行尾（EOL）统一策略
+# -----------------------------------------------------------------------------
+#  背景：本项目在 Windows 上开发、部署到 CentOS 8。
+#  如果 Git 开启了 core.autocrlf=true（Windows 上很常见），shell 脚本会被
+#  检出成 CRLF 行尾，上传到 Linux 后执行会直接报错：
+#
+#      bash: ./ssl-issue.sh: /usr/bin/env: bad interpreter: No such file or directory
+#
+#  用 .gitattributes 在仓库层面强制脚本始终以 LF 存储和检出，从根上避免这个问题。
+#  （比在每个开发者机器上配 core.autocrlf 更可靠）
+# =============================================================================
+
+# 默认：所有文本文件使用 LF
+* text=auto eol=lf
+
+# ---- 必须是 LF 的脚本类文件（双保险，显式声明）----
+*.sh    text eol=lf
+*.bash  text eol=lf
+# 脚本模板（例如 renewpost.sh.example.nginx / .example.docker，
+# 会被拷成 renewpost.sh 在 Linux 上执行 ⇒ 必须 LF）
+*.sh.example  text eol=lf
+*.example.nginx   text eol=lf
+*.example.docker  text eol=lf
+*.env   text eol=lf
+Dockerfile text eol=lf
+Makefile   text eol=lf
+*.service  text eol=lf
+*.timer    text eol=lf
+*.conf     text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
+*.json     text eol=lf
+
+# ---- Windows 原生脚本保留 CRLF ----
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# ---- 二进制文件不做任何行尾转换 ----
+*.pem    binary
+*.key    binary
+*.crt    binary
+*.cer    binary
+*.pfx    binary
+*.p12    binary
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.webp   binary
+*.zip    binary
+*.gz     binary
+*.tar    binary
+*.tgz    binary
+*.pdf    binary
+*.woff   binary
+*.woff2  binary
+*.ttf    binary

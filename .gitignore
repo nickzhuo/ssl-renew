@@ -1,0 +1,70 @@
+# =============================================================================
+#  安全红线：以下内容绝对不允许进入仓库
+# =============================================================================
+
+# 腾讯云 API 密钥（Tencent_SecretId / Tencent_SecretKey）—— 唯一敏感的配置文件
+# 注意：domains.conf（域名列表）和 ssl.conf（全局策略）都不含密钥，可以提交
+scripts/ssl/secrets.env
+scripts/ssl/secrets.env.local
+scripts/ssl-nginx/secrets.env
+scripts/ssl-nginx/secrets.env.local
+# 通配兜底：以后新增的 ssl-* 套件目录（ssl-traefik、ssl-caddy …）也自动覆盖，
+# 避免"新开一套脚本忘了加忽略规则"把密钥提交上去
+scripts/ssl*/secrets.env
+scripts/ssl*/secrets.env.local
+# 兼容旧命名，防止历史文件被误提交
+scripts/ssl/.env
+scripts/ssl/.env.local
+scripts/ssl/.env.*.local
+scripts/ssl-nginx/.env
+scripts/ssl-nginx/.env.local
+scripts/ssl-nginx/.env.*.local
+scripts/ssl*/.env
+scripts/ssl*/.env.local
+scripts/ssl*/.env.*.local
+
+# 续期后置钩子 —— 服务器本地文件，里面的路径/服务名因机器而异，不要提交
+# （仓库里只保留模板 scripts/ssl/renewpost.sh.example.nginx / .example.docker）
+scripts/ssl/renewpost.sh
+scripts/ssl/renewpost.sh.local
+scripts/ssl-nginx/renewpost.sh
+scripts/ssl-nginx/renewpost.sh.local
+scripts/ssl*/renewpost.sh
+scripts/ssl*/renewpost.sh.local
+# ★ 钩子模板必须留在仓库里（部署时复制成 renewpost.sh）。
+#   下面两条是防呆：万一以后有人加了 scripts/ssl*/renewpost.sh* 这类宽规则，
+#   这两个模板仍会被跟踪。
+!scripts/ssl/renewpost.sh.example.nginx
+!scripts/ssl/renewpost.sh.example.docker
+
+# 证书、私钥、证书链、PFX
+ssl/*
+!ssl/.gitkeep
+*.pem
+*.key
+*.crt
+*.cer
+*.pfx
+*.p12
+*.csr
+*.der
+*.jks
+*.keystore
+
+# acme.sh 缓存（万一被放进项目目录）
+.acme.sh/
+**/.acme.sh/
+
+# =============================================================================
+#  通用忽略
+# =============================================================================
+*.log
+logs/
+tmp/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# WorkBuddy 工作记录，不属于项目代码
+.workbuddy/
