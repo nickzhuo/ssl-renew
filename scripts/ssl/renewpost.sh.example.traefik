@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  证书续期后置钩子 —— Traefik 热加载版（.example.traefik）
+#
+#  ★ 这是服务器上实际在用的实现，与 .example.docker 是两条不同路线：
+#
+#      .example.docker    docker-compose up --force-recreate 重建容器（重，1~2 秒中断）
+#      .example.traefik   改一个字节让动态配置产生写入事件 → Traefik 自动热加载（轻，无中断）
+#
+#  这台机器用后者：Traefik 挂了 ./:/conf:ro 且 watch=true，
+#  只要 dynamic_conf.toml 有真实写入事件就会重建证书库。
+#  但 Traefik 对"证书文件本身被替换"无感知，所以必须主动制造一次配置写入。
+#
+#  为什么用 sed -i 而不是 touch：
+#      sed -i 写临时文件再 rename，产生真实写入/重命名事件；touch 只改 mtime，
+#      Traefik 未必理会。内容一字节不变，git 工作区不会脏。
+#
+#  流程：
+#      1. check_all 比对「磁盘证书 serial」vs「Traefik 实际下发 serial」
+#      2. 不一致 → 用 → 提示（预期状态，不是错误）
+#      3. sed -i 触发重载，最多等 10 秒
+#      4. 仍未生效 → 退回 restart 容器（宁可断 1 秒，不能线上还是旧证书）
+#      5. 终检仍不一致 → 退出非 0，让 ssl-renew.service 记成失败
+#
+#  用法：
+#      bash renewpost.sh --dry-run    # 只看现状
+#      bash renewpost.sh              # 正式执行
+#
+#  ★ 本文件是服务器本地文件，不进 git（含本机路径与容器名）。
+#    这里存一份脱敏副本，防止机器重装后丢失实现。
+# =============================================================================
+set -euo pipefail
+
+CONF="${CONF:-/root/docker/api/dynamic_conf.toml}"   # Traefik 动态配置（列着证书路径）
+CERT_DIR="${CERT_DIR:-/root/cert}"                    # 续期套件的证书落盘目录
+CONTAINER="${CONTAINER:-api_proxy_1}"                 # Traefik 容器名
+PORT="${PORT:-443}"                                   # 本机 Traefik 的 https 端口
+
+DRY_RUN=0
+[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
+
+log() { printf '  %s\n' "$*"; }
+
+# systemd 触发时 PATH 是精简的，docker 不一定在
+DOCKER="$(command -v docker || true)"
+[ -n "$DOCKER" ] || DOCKER="/usr/bin/docker"
+[ -x "$DOCKER" ] || { log "✘ 找不到 docker"; exit 127; }
+
+[ -f "$CONF" ] || { log "✘ 配置文件不存在：$CONF"; exit 1; }
+[ -d "$CERT_DIR" ] || { log "✘ 证书目录不存在：$CERT_DIR"; exit 1; }
+
+# 以 /root/cert 的证书清单为准：以后加域名，这里自动纳入，不用改脚本
+DOMAINS=()
+while IFS= read -r f; do
+  DOMAINS+=("$(basename "$f" .fullchain.pem)")
+done < <(find "$CERT_DIR" -maxdepth 1 -name '*.fullchain.pem' | sort)
+
+[ "${#DOMAINS[@]}" -gt 0 ] || { log "✘ $CERT_DIR 下没有 .fullchain.pem"; exit 1; }
+
+# 比对「文件里的证书 serial」与「Traefik 实际下发的证书 serial」，不一致就打印
+check_all() {
+  local quiet="$1" d want got bad=0
+  for d in "${DOMAINS[@]}"; do
+    want="$(openssl x509 -in "$CERT_DIR/$d.fullchain.pem" -noout -serial | cut -d= -f2)"
+    got="$(echo | openssl s_client -connect "127.0.0.1:$PORT" -servername "$d" 2>/dev/null \
+            | openssl x509 -noout -serial 2>/dev/null | cut -d= -f2 || true)"
+    if [ "$want" != "$got" ]; then
+      bad=1
+      # 用 → 而不是 ✗：这里只是"还没重载，线上自然是旧证书"，属于预期状态。
+      # 真正的失败判定在重载后的 check_all 里做（那时不一致才是真失败）。
+      [ "$quiet" = 1 ] || log "→ $d：线上仍是旧证书，待重载后核对"
+    fi
+  done
+  [ "$bad" = 0 ]
+}
+
+log "共 ${#DOMAINS[@]} 个域名待核对"
+
+if check_all 0; then
+  log "✔ 证书已是最新，无需动作"
+  exit 0
+fi
+
+if [ "$DRY_RUN" = 1 ]; then
+  log "dry-run：以上域名未生效，正式执行会触发重载（必要时重启容器）"
+  exit 0
+fi
+
+# ---- 1. 触发重载：原样重写配置文件，内容不变但产生真实写入事件 ----
+log "触发 Traefik 重载…"
+sed -i 's/^# 证书配置$/# 证书配置/' "$CONF" || true
+
+# ---- 2. 等它生效，最多 10 轮 ----
+reloaded=0
+for _ in $(seq 1 10); do
+  sleep 1
+  if check_all 1; then reloaded=1; break; fi
+  printf '.'
+done
+[ "$reloaded" = 1 ] && printf '\n'
+
+# ---- 3. 没生效就退回重启（1~2 秒中断，一年也就几次） ----
+if [ "$reloaded" != 1 ]; then
+  printf '\n'
+  log "热加载未生效，退回重启 $CONTAINER"
+  "$DOCKER" restart "$CONTAINER" >/dev/null
+  sleep 6
+fi
+
+# ---- 4. 终检：仍不一致就报错退出，让续期任务记成失败 ----
+if check_all 0; then
+  if [ "$reloaded" = 1 ]; then
+    log "✔ 热加载生效，未重启"
+  else
+    log "✔ 重启后生效"
+  fi
+  exit 0
+fi
+
+log "✘ 重载/重启后证书仍不一致"
+log "  多半是这个域名在 $CERT_DIR 下有证书，但 $CONF 里没有对应的 [[tls.certificates]] 条目"
+exit 1
