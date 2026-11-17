@@ -9,7 +9,7 @@
 - 每次运行往文件里追加一行结果 —— CentOS 8 的 journal 默认不持久化，重启查不到历史
 
 > 本文是仓库入口，讲「怎么用、怎么运维、出问题看哪里」。
-> 每个参数的细节、每个坑的成因，在 **[`scripts/ssl/README.md`](scripts/ssl/README.md)**（十五节，1100+ 行）。
+> 每个参数的细节、每个坑的成因，在 **[`scripts/README.md`](scripts/README.md)**（十五节，1100+ 行）。
 
 ---
 
@@ -22,22 +22,13 @@
 （真漏过：`ssl-status.sh` 里写死的 unit 名没跟着改，状态检查一直去查另一套的 unit，
 报「未安装」，白误导了一轮排查）。
 
-现在收敛成一套：**代码只此一份，差异全部外置成配置**。
+现在收敛成一套：**代码只此一份、目录也只有一层，差异全部外置成配置**。
 
 ```
-                        ┌──────────────────────────────┐
-                        │  scripts/ssl/  （唯一代码）  │
-                        │  lib.sh / ssl-issue.sh / ... │
-                        └───────────────┬──────────────┘
-                                        │  读 ssl.conf
-                      ┌─────────────────┴─────────────────┐
-                      ▼                                   ▼
-        SSL_OUTPUT_DIR=/root/cert            SSL_OUTPUT_DIR=/etc/nginx/ssl
-        SSL_UNIT_NAME=ssl-renew              SSL_UNIT_NAME=ssl-nginx-renew
-        renewpost.sh  MODE=traefik           renewpost.sh  MODE=nginx
-                      │                                   │
-                      ▼                                   ▼
-               Traefik 机器 (docker)                nginx 机器 (systemd)
+scripts/                        ← 唯一的一套代码，没有 ssl/ 子目录
+  │  读 ssl.conf + renewpost.sh 的 RELOAD_MODE
+  ├─▶ Traefik 机器   SSL_OUTPUT_DIR=/root/cert        SSL_UNIT_NAME=ssl-renew         MODE=traefik
+  └─▶ nginx   机器   SSL_OUTPUT_DIR=/etc/nginx/ssl    SSL_UNIT_NAME=ssl-nginx-renew   MODE=nginx
 ```
 
 **部署到第二台机器时，只改两行 + 一行**：
@@ -80,13 +71,11 @@ sed -i 's/^RELOAD_MODE="none"/RELOAD_MODE="nginx"/' renewpost.sh
 
 ```
 <项目根>/
-├── README.md                      # 本文件
+├── README.md                      # 本文件：总览 / 快速上手 / 运维手册
 ├── .gitattributes                 # ★ 强制 *.sh 为 LF 行尾（Windows 开发必看）
 ├── .gitignore                     # 排除 secrets.env / renewpost.sh 与所有证书私钥
-├── ssl/                           # 早期占位目录，仅 .gitkeep
-│                                  #   实际证书落盘位置由 ssl.conf 的 SSL_OUTPUT_DIR 决定
-└── scripts/ssl/                   # ★ 唯一的一套代码
-    ├── README.md                  # 详细文档（十五节）
+└── scripts/                       # ★ 全部代码与配置都在这一层，没有 ssl/ 子目录
+    ├── README.md                  # 详细文档（十五节，1100+ 行）
     ├── lib.sh                     # 共用函数库（不直接执行）★ 服务商规格表在这里
     ├── ssl-issue.sh               # 批量签发 / 续期
     ├── ssl-status.sh              # 每张证书的到期时间总览
@@ -100,6 +89,10 @@ sed -i 's/^RELOAD_MODE="none"/RELOAD_MODE="nginx"/' renewpost.sh
     ├── renewpost.sh               # ★ 服务器本地钩子 ← 复制后改，不进 Git
     └── dynamic_conf.toml          # Traefik 消费方配置参考（本地留档，防重装丢失）
 ```
+
+> **没有 `scripts/ssl/` 这一层。** 以前有两台机器就有两个目录（`ssl/` 和 `ssl-nginx/`），
+> 后来发现差异只有「输出目录 / unit 名 / 钩子动作」三项 —— 全部能外置成配置，
+> 于是所有文件直接铺在 `scripts/` 下，一套代码管所有机器。
 
 证书输出（`flat` 布局，`SSL_OUTPUT_DIR` 下的样子）：
 
@@ -128,7 +121,7 @@ CentOS 8 已 EOL，官方源下线 —— 本套脚本**不依赖任何包安装
 
 ```bash
 # 本地
-cd scripts/ssl
+cd scripts
 scp lib.sh ssl-issue.sh ssl-status.sh ssl-setup.sh ssl-repair.sh \
     ssl.conf secrets.env.example domains.conf renewpost.sh.example README.md \
     root@<服务器IP>:/opt/ssl/
@@ -344,8 +337,8 @@ vi domains.conf          # 加一行
 - 建议每个服务商都用**子账号 + 仅 DNS 权限**的凭据，别用主账号密钥。
 - 验证凭据没进版本库：
   ```bash
-  git check-ignore -v scripts/ssl/secrets.env     # 应输出忽略规则
-  git check-ignore -v scripts/ssl/renewpost.sh   # 应输出忽略规则
+  git check-ignore -v scripts/secrets.env     # 应输出忽略规则
+  git check-ignore -v scripts/renewpost.sh   # 应输出忽略规则
   git grep -n 'AKID' $(git rev-list --all) 2>/dev/null   # 应无输出
   ```
 
@@ -393,7 +386,7 @@ sudo systemctl start <SSL_UNIT_NAME>.timer
 
 ## 十、详细文档
 
-**[`scripts/ssl/README.md`](scripts/ssl/README.md)** —— 1100+ 行，十五节：
+**[`scripts/README.md`](scripts/README.md)** —— 1100+ 行，十五节：
 
 | 节 | 内容 |
 |---|---|
