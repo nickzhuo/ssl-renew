@@ -320,8 +320,8 @@ if [ "$N_TIMERS" -eq 1 ]; then
     info "  它目录里的 ssl.conf 声明要装：${dec0}"
     info "  实际装着的是：            ${t0}"
     printf '\n'
-    info "常见原因：这个目录里的文件是从**另一套**复制过来的（比如把 scripts/ssl/ 的内容"
-    info "倒进了名叫 ssl-nginx 的目录），而 unit 是更早、或手工装上去的。"
+    info "常见原因：这个目录里的文件是从**另一套**复制过来的（比如把 /opt/ssl/ 的内容"
+    info "倒进了 /opt/ssl-old/ 之类的目录），而 unit 是更早、或手工装上去的。"
     info "功能上没影响 —— 脚本本身不看 unit 名，只看 ExecStart 指向谁。只是名字对不上，"
     info "以后排障容易看糊涂。"
     printf '\n'

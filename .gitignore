@@ -6,8 +6,6 @@
 # 注意：domains.conf（域名列表）和 ssl.conf（全局策略）都不含密钥，可以提交
 scripts/ssl/secrets.env
 scripts/ssl/secrets.env.local
-scripts/ssl-nginx/secrets.env
-scripts/ssl-nginx/secrets.env.local
 # 通配兜底：以后新增的 ssl-* 套件目录（ssl-traefik、ssl-caddy …）也自动覆盖，
 # 避免"新开一套脚本忘了加忽略规则"把密钥提交上去
 scripts/ssl*/secrets.env
@@ -16,26 +14,20 @@ scripts/ssl*/secrets.env.local
 scripts/ssl/.env
 scripts/ssl/.env.local
 scripts/ssl/.env.*.local
-scripts/ssl-nginx/.env
-scripts/ssl-nginx/.env.local
-scripts/ssl-nginx/.env.*.local
 scripts/ssl*/.env
 scripts/ssl*/.env.local
 scripts/ssl*/.env.*.local
 
 # 续期后置钩子 —— 服务器本地文件，里面的路径/服务名因机器而异，不要提交
-# （仓库里只保留模板 scripts/ssl/renewpost.sh.example.nginx / .example.docker）
+# （仓库里只保留**一个**模板 scripts/ssl/renewpost.sh.example，顶部 RELOAD_MODE 四选一）
 scripts/ssl/renewpost.sh
 scripts/ssl/renewpost.sh.local
-scripts/ssl-nginx/renewpost.sh
-scripts/ssl-nginx/renewpost.sh.local
 scripts/ssl*/renewpost.sh
 scripts/ssl*/renewpost.sh.local
 # ★ 钩子模板必须留在仓库里（部署时复制成 renewpost.sh）。
-#   下面两条是防呆：万一以后有人加了 scripts/ssl*/renewpost.sh* 这类宽规则，
-#   这两个模板仍会被跟踪。
-!scripts/ssl/renewpost.sh.example.nginx
-!scripts/ssl/renewpost.sh.example.docker
+#   下面是防呆：万一以后有人加了 scripts/ssl*/renewpost.sh* 这类宽规则，
+#   这个模板仍会被跟踪。
+!scripts/ssl/renewpost.sh.example
 
 # 证书、私钥、证书链、PFX
 ssl/*
