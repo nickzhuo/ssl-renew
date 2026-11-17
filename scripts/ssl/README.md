@@ -10,7 +10,7 @@
 |---|---|---|---|
 | 证书输出目录 | `/root/cert` | `/etc/nginx/ssl` | `ssl.conf` → `SSL_OUTPUT_DIR` |
 | systemd unit 名 | `ssl-renew` | `ssl-nginx-renew` | `ssl.conf` → `SSL_UNIT_NAME` |
-| 续期后置动作 | `renewpost.sh.example.docker` | `renewpost.sh.example.nginx` | 复制成 `renewpost.sh` |
+| 续期后置动作 | `traefik`（热加载，无中断） | `nginx`（重启） | `renewpost.sh` 顶部 `RELOAD_MODE` |
 
 - 支持泛域名（`*.example.com`）
 - **支持多个 DNS 服务商**：腾讯云 DNSPod、GoDaddy，可混在一份列表里（见第五节）
@@ -30,7 +30,7 @@
 并且**复制目录时一定会漏改某处**（真漏过：`ssl-status.sh` 里写死的 unit 名没跟着改，
 状态检查一直去查另一套的 unit，报「未安装」，白误导了一轮排查）。
 
-现在收敛成一套：**代码只此一份，差异全部外置成配置**。
+现在收敛成一套：**代码只此一份，钩子模板也只此一份，差异全部外置成配置。**
 
 ```
                           ┌──────────────────────────────┐
@@ -42,36 +42,41 @@
                         ▼                                   ▼
           SSL_OUTPUT_DIR=/root/cert            SSL_OUTPUT_DIR=/etc/nginx/ssl
           SSL_UNIT_NAME=ssl-renew              SSL_UNIT_NAME=ssl-nginx-renew
-          renewpost.sh ← .example.docker       renewpost.sh ← .example.nginx
+          renewpost.sh  MODE=traefik           renewpost.sh  MODE=nginx
                         │                                   │
                         ▼                                   ▼
                  Traefik 机器 (docker)                nginx 机器 (systemd)
 ```
 
-### 部署到第二台机器时，只需要改三行
+### 部署到第二台机器时，只需要改两处 + 一行钩子开关
 
 ```bash
-# 1) ssl.conf
+# 1) ssl.conf —— 两项
 SSL_OUTPUT_DIR="/etc/nginx/ssl"      # 证书落到哪
 SSL_UNIT_NAME="ssl-nginx-renew"      # systemd unit 名（同机装两套时**必须**不同）
 
-# 2) 复制对应的钩子模板
-cp renewpost.sh.example.nginx renewpost.sh && chmod +x renewpost.sh
+# 2) renewpost.sh —— 复制唯一模板，再改一行 RELOAD_MODE
+cp renewpost.sh.example renewpost.sh && chmod +x renewpost.sh
+sed -i 's/^RELOAD_MODE="none"/RELOAD_MODE="nginx"/' renewpost.sh
 ```
 
 其余 `lib.sh` / `ssl-issue.sh` / `ssl-status.sh` / `ssl-setup.sh` / `ssl-repair.sh`
 **两台机器完全一样**，升级时逐文件覆盖即可。
 
-> **脚本目录叫什么名字，现在完全不影响功能。** 判断"这台机器该装哪个 unit"的唯一依据
-> 是 `ssl.conf` 里的 `SSL_UNIT_NAME`，不是目录名。所以你 **不需要**把服务器上
-> `ssl-nginx` 这个目录改名 —— 直接把新脚本覆盖进去，保留它的 `ssl.conf` 就行。
+> **脚本目录叫什么名字，完全不影响功能。** 判断"这台机器该装哪个 unit"的唯一依据
+> 是 `ssl.conf` 里的 `SSL_UNIT_NAME`，不是目录名 —— 两台服务器上的目录**可以都叫
+> `/opt/ssl`**，配置不同而已。
+>
+> **仓库里的 `scripts/ssl-nginx/` 已经删掉了**（它里面只剩一份 `ssl.conf`，差异已并入
+> 本目录 `ssl.conf` 的注释）。服务器上那个目录**不改名也能继续跑**，但下次升级时直接从
+> `scripts/ssl/` 传文件过去，两台机器就都只剩一套代码了。
 >
 > 具体到你的两台机器：
 >
-> | 机器 | 目录 | `ssl.conf` 里必须有 |
+> | 机器 | `ssl.conf` 里必须有 | `renewpost.sh` 的 `RELOAD_MODE` |
 > |---|---|---|
-> | Traefik（VM-12-2-centos） | `.../ssl/` | `SSL_OUTPUT_DIR="/root/cert"`、`SSL_UNIT_NAME="ssl-renew"` |
-> | nginx（b919p4） | `.../ssl-nginx/` | `SSL_OUTPUT_DIR="/etc/nginx/ssl"`、`SSL_UNIT_NAME="ssl-nginx-renew"` |
+> | Traefik（VM-12-2-centos） | `SSL_OUTPUT_DIR="/root/cert"`、`SSL_UNIT_NAME="ssl-renew"` | `traefik` |
+> | nginx（b919p4） | `SSL_OUTPUT_DIR="/etc/nginx/ssl"`、`SSL_UNIT_NAME="ssl-nginx-renew"` | `nginx` |
 >
 > `secrets.env` / `domains.conf` **原样不动** —— 新版本对老配置是向后兼容的：
 > 不写 `dns=` 默认就是 `tencent`，不写 `account=` 默认就是 `default`。
@@ -87,7 +92,7 @@ cp renewpost.sh.example.nginx renewpost.sh && chmod +x renewpost.sh
 | `secrets.env` | **只有** DNS 服务商的 API 凭据（腾讯云 + GoDaddy，各可多账号） | ★ 敏感 | ✗ 已 gitignore |
 | `domains.conf` | 域名列表，**每行一张证书**，可标 `dns=` / `account=` | 否 | ✓ 可以 |
 | `ssl.conf` | 全局策略（邮箱、算法、输出目录、unit 名、阈值…） | 否 | ✓ 可以 |
-| `renewpost.sh` | 证书更新后干什么（重启 nginx / 重建容器） | 含服务器本地路径 | ✗ 已 gitignore（只提交 `.example.*` 模板） |
+| `renewpost.sh` | 证书更新后干什么（`RELOAD_MODE` 四选一：none / nginx / traefik / compose） | 含服务器本地路径 | ✗ 已 gitignore（只提交 `renewpost.sh.example`） |
 
 好处：密钥文件只放密钥、一眼能看出有没有泄露；域名列表可以放心进版本库，
 加域名就是加一行，不用碰任何密钥。域名换服务商、换账号、调续期阈值也全在 `domains.conf` 里改。
@@ -109,8 +114,8 @@ cp renewpost.sh.example.nginx renewpost.sh && chmod +x renewpost.sh
     ├── secrets.env.example        # 凭据模板（腾讯云 + GoDaddy 两段）
     ├── secrets.env                # ★ 真实凭据        ← 复制后填，不进 Git
     ├── domains.conf               # ★ 域名列表 + dns=/account= 归属  ← 加域名改这里
-    ├── renewpost.sh.example.nginx # 续期钩子模板：nginx -t → restart → 校验
-    ├── renewpost.sh.example.docker# 续期钩子模板：docker compose --force-recreate → 校验
+    ├── renewpost.sh.example        # ★ 唯一的续期钩子模板，顶部 RELOAD_MODE 四选一
+    │                               #   none / nginx / traefik / compose
     ├── renewpost.sh               # ★ 服务器本地钩子  ← 复制后改，不进 Git
     ├── ssl-issue.sh               # 批量签发 / 续期
     ├── ssl-status.sh              # 每张证书的到期时间总览
@@ -580,18 +585,28 @@ sudo ./ssl-repair.sh --apply --keep ssl-renew.timer     # ② 确认无误后收
 
 两个都配了会告警，并且**只执行 `renewpost.sh`**（避免动作重复）。
 
-仓库里带两个模板，**按你的消费方挑一个**：
+仓库里只有**一个模板** `renewpost.sh.example`，顶部的 `RELOAD_MODE` 决定它做什么：
 
-| 模板 | 动作 | 用在 |
+| `RELOAD_MODE` | 动作 | 用在 |
 |---|---|---|
-| `renewpost.sh.example.nginx` | `nginx -t` → `systemctl restart nginx` → 校验 `is-active` | nginx 机器 |
-| `renewpost.sh.example.docker` | `docker compose up --force-recreate` → 校验容器 `running` | Traefik 机器（容器化） |
+| `none` | 什么都不做 | 本机不需要重载（更干净的做法是干脆不建 `renewpost.sh`） |
+| `nginx` | `nginx -t` → `systemctl restart nginx` → 校验 `is-active` | nginx 机器 |
+| `traefik` | 写一次动态配置触发热加载 → 核对线上证书 serial → 没生效再重启容器 | Traefik 机器（容器，**无中断**） |
+| `compose` | `docker compose up --force-recreate` → 校验容器 `running` | 其它容器服务（没有动态配置可写时才用） |
 
 ```bash
-cp renewpost.sh.example.nginx renewpost.sh    # 或 .example.docker
+cp renewpost.sh.example renewpost.sh
 chmod +x renewpost.sh
-vi renewpost.sh                               # 改顶部几个变量
+vi renewpost.sh        # 只改顶部：RELOAD_MODE + 该模式那几个变量
 ```
+
+> `ssl-setup.sh` 首次初始化时会**自动检测**本机类型并直接把 `RELOAD_MODE` 写好
+> （有 nginx → `nginx`；有 `dynamic_conf.toml` → `traefik`；只有 compose 项目 → `compose`），
+> 所以正常部署不用手工挑。
+>
+> 同一个模板的好处：三种做法的差别摆在**同一个文件里**，换机器时不会"复制了 A 模板、
+> 却照 B 模板的记忆去改"。以前三个 `*.example.*` 就踩过这个 —— 改了 nginx 那份，
+> 忘了 docker 那份同样的 bug。
 
 > **为什么不用 `ssl.conf` 的 `SSL_RELOAD_CMD`？**
 > 它仍然可用（没配 `renewpost.sh` 时作为兜底），但它只能写一行命令，
@@ -642,13 +657,45 @@ echo | openssl s_client -connect <域名>:443 -servername <域名> \
 看到 `notAfter` 是新日期才算真生效。仍是旧日期 ⇒ 旧 worker 还没退，只能 `restart`。
 nginx 服务名不是 `nginx` 时改 `NGINX_SERVICE`。
 
-### 3. docker 版
+### 3. 容器消费方：`traefik` 与 `compose`
+
+#### 3.1 `traefik` —— 热加载，几乎无中断（Traefik 机器用这个）
+
+Traefik 挂了动态配置目录且 `watch=true` 时，只要 `dynamic_conf.toml` 出现**真实写入事件**
+就会重建证书库。但 Traefik 对"证书文件本身被替换"**没有感知**，所以钩子必须主动制造一次写入。
+
+模板顶部四个变量：
+
+```bash
+TRAEFIK_CONF="/root/docker/api/dynamic_conf.toml"   # ★ 必须是 Traefik 实际在 watch 的那一份
+TRAEFIK_CERT_DIR="/root/cert"                       # 证书落盘目录（flat 布局）
+TRAEFIK_CONTAINER="api_proxy_1"                     # Traefik 容器名
+TRAEFIK_PORT="443"                                  # 本机 https 端口，用于回连核对
+```
+
+执行流程：
+
+1. 比对「磁盘证书 serial」与「Traefik 实际下发的 serial」（`openssl s_client -servername`）；
+2. 全部一致 → 直接退出，**什么都不做**（重复执行安全）；
+3. 有差异 → `sed -i` 原地重写一行注释，制造真实写入事件，触发重载；
+4. 最多等 10 秒；仍不一致 → 退回 `docker restart` 容器（宁可断 1 秒，不能线上还是旧证书）；
+5. 终检仍不一致 → 非 0 退出，让续期日志记成 **FAIL**。
+
+> **为什么用 `sed -i` 而不是 `touch`**：`sed -i` 是"写临时文件再 rename"，会产生真实的
+> 写入/重命名事件；`touch` 只改 mtime，Traefik 未必理会。改写前后内容一字节不变，
+> 所以 git 工作区不会脏。
+
+> **为什么必须回连核对**：这是唯一能证明"线上真的换成新证书"的方法。
+> 只看 `docker restart` 返回 0 是不够的 —— 容器起来了但动态配置里没有这个域名的
+> `[[tls.certificates]]` 条目，Traefik 照样会下发默认证书。
+
+#### 3.2 `compose` —— 强制重建容器
 
 模板顶部三个变量：
 
 ```bash
 COMPOSE_DIR="/root/docker/api"     # 有 docker-compose.yml 的目录
-COMPOSE_SERVICE="proxy"            # 要重建的服务名
+COMPOSE_SERVICE="proxy"            # 要重建的服务名（services: 下的名字，不是容器名）
 COMPOSE_ARGS="--force-recreate -d --no-deps"
 ```
 
@@ -665,12 +712,13 @@ cd /root/docker/api && docker compose up --force-recreate -d --no-deps proxy
 这样"证书换好了但服务挂了"不会被记成成功。
 
 > ⚠️ **容器化消费方的两个坑**（Traefik 场景实测踩过）：
-> ① `docker restart` **不会套用新的挂载**，必须 `docker compose up -d` 重建容器 ——
->   所以钩子里用 `--force-recreate` 而不是 `restart`；
+> ① `docker restart` **不会套用新的挂载**（改的是 compose 里的挂载路径时）——
+>   重挂载必须 `docker compose up -d` 重建容器。但证书文件**内容**被替换后
+>   `restart` 是会重新读的，所以 `traefik` 模式拿 `restart` 兜底有效；
 > ② 如果证书目录挂在 `/root/` 下面，注意 `/root` 权限通常是 550，
 >   非 root 的容器读不进去 —— 挂到 `/data/cert` 之类的位置更稳。
 
-两个模板都能先空跑确认再真跑：
+四种模式都能先空跑确认再真跑：
 
 ```bash
 bash renewpost.sh --dry-run    # 只打印将要执行的命令，不碰服务
@@ -735,11 +783,13 @@ tail -n 5 <SSL_OUTPUT_DIR>/renew.log    # 最近几次
 
 ### 5. `ssl-setup.sh` 会帮你做
 
-- 检测到 **nginx** → 从 `renewpost.sh.example.nginx` 生成 `renewpost.sh` 并 `chmod +x`；
-- 没检测到 nginx、但检测到 `DEFAULT_COMPOSE_DIR`（默认 `/root/docker/api`）存在 →
-  从 `renewpost.sh.example.docker` 生成；
-- 两个都没检测到 → **只提示，不生成一个必然失败的钩子**，并给出两条 `cp` 命令让你自选；
-- 已存在 `renewpost.sh` → **不动它**（那是你的文件）。
+- 检测到 **nginx** → 用唯一的 `renewpost.sh.example` 生成 `renewpost.sh`，
+  写入 `RELOAD_MODE="nginx"`，并 `chmod +x`；
+- 没检测到 nginx、但 `<DEFAULT_COMPOSE_DIR>/dynamic_conf.toml` 存在（默认 `/root/docker/api`）→
+  生成并写入 `RELOAD_MODE="traefik"`；
+- 没检测到 nginx、只有 `DEFAULT_COMPOSE_DIR` 目录 → 生成并写入 `RELOAD_MODE="compose"`；
+- 都没检测到 → **只提示，不生成一个必然失败的钩子**，并列出四种模式让你自选；
+- 已存在 `renewpost.sh` → **不动它**（那是你的文件），只把当前的 `RELOAD_MODE` 念出来。
 
 想改默认 compose 目录，改 `ssl-setup.sh` 顶部的 `DEFAULT_COMPOSE_DIR` 即可。
 
@@ -949,7 +999,7 @@ sed -i 's/\r$//' scripts/ssl/*.sh && chmod +x scripts/ssl/*.sh
   权限 600，已被 `.gitignore` 排除。脚本每次运行都会检查它的权限，过宽会告警。
   `.gitignore` 里还用了 `scripts/ssl*/secrets.env` 通配兜底 —— 以后新开的套件目录也自动覆盖。
 - `renewpost.sh` 虽然不含密钥，但记录了你服务器的目录结构和服务名，同样已被 `.gitignore`
-  排除；仓库里只放 `renewpost.sh.example.{nginx,docker}` 两个通用模板。
+  排除；仓库里只放 `renewpost.sh.example` 这一个通用模板（`RELOAD_MODE` 四选一）。
 - `renew.log` 只记录张数、时间、模式，**不含任何密钥**，且位于证书目录（已被 gitignore）。
 - **多账号之间的凭据是彼此隔离的**：脚本逐张切换凭据（且**先清空所有服务商的槽位**再写入目标），
   每张签发后自动清掉 acme.sh 在 `~/.acme.sh/account.conf` 里留下的密钥副本，
@@ -977,7 +1027,7 @@ sed -i 's/\r$//' scripts/ssl/*.sh && chmod +x scripts/ssl/*.sh
 | 类别 | 文件 | 升级时 |
 |---|---|---|
 | **脚本** | `lib.sh`、`ssl-issue.sh`、`ssl-status.sh`、`ssl-setup.sh`、`ssl-repair.sh`、`README.md` | ✅ 覆盖，随便传 |
-| **模板**（可选） | `renewpost.sh.example.nginx`、`renewpost.sh.example.docker` | ✅ 覆盖；只在首次生成钩子时用一次 |
+| **模板**（可选） | `renewpost.sh.example` | ✅ 覆盖；只是**模板**，服务器上的 `renewpost.sh` 不受影响 |
 | **配置** | `secrets.env`、`domains.conf`、`ssl.conf`、`renewpost.sh` | ⛔ **绝不能覆盖** —— 传上去就把凭据/域名/unit 名/钩子清了 |
 | 服务器本地 | `/etc/systemd/system/<SSL_UNIT_NAME>.{service,timer}`、输出目录下的证书、`renew.log` | ⛔ 不用管，也别重复 `ssl-setup.sh` |
 
