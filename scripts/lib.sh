@@ -28,7 +28,10 @@ fi
 #  路径
 # -----------------------------------------------------------------------------
 SSL_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd -- "${SSL_LIB_DIR}/../.." && pwd)"
+# ★ 脚本直接放在 <项目根>/scripts/ 下（没有 scripts/ 那一层），所以项目根是**上一级**。
+#   改这一行之前先想清楚：ssl.conf 里 SSL_OUTPUT_DIR 写相对路径时，就是相对 PROJECT_ROOT
+#   解析的（当前配置是 "cert" ⇒ <项目根>/cert）。多退一级会把证书签到仓库外面去。
+PROJECT_ROOT="$(cd -- "${SSL_LIB_DIR}/.." && pwd)"
 
 # 三个配置文件各司其职，都可以用环境变量覆盖：
 #   SECRETS_FILE  DNS 服务商的 API 凭据   （保密，gitignore）

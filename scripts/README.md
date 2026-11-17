@@ -30,22 +30,13 @@
 并且**复制目录时一定会漏改某处**（真漏过：`ssl-status.sh` 里写死的 unit 名没跟着改，
 状态检查一直去查另一套的 unit，报「未安装」，白误导了一轮排查）。
 
-现在收敛成一套：**代码只此一份，钩子模板也只此一份，差异全部外置成配置。**
+现在收敛成一套：**代码只此一份，钩子模板也只此一份，目录只有一层，差异全部外置成配置。**
 
 ```
-                          ┌──────────────────────────────┐
-                          │  scripts/ssl/  （唯一代码）  │
-                          │  lib.sh / ssl-issue.sh / ... │
-                          └───────────────┬──────────────┘
-                                          │  读 ssl.conf
-                        ┌─────────────────┴─────────────────┐
-                        ▼                                   ▼
-          SSL_OUTPUT_DIR=/root/cert            SSL_OUTPUT_DIR=/etc/nginx/ssl
-          SSL_UNIT_NAME=ssl-renew              SSL_UNIT_NAME=ssl-nginx-renew
-          renewpost.sh  MODE=traefik           renewpost.sh  MODE=nginx
-                        │                                   │
-                        ▼                                   ▼
-                 Traefik 机器 (docker)                nginx 机器 (systemd)
+scripts/                        ← 唯一的一套代码，没有 ssl/ 子目录
+  │  读 ssl.conf + renewpost.sh 的 RELOAD_MODE
+  ├─▶ Traefik 机器   SSL_OUTPUT_DIR=/root/cert        SSL_UNIT_NAME=ssl-renew         MODE=traefik
+  └─▶ nginx   机器   SSL_OUTPUT_DIR=/etc/nginx/ssl    SSL_UNIT_NAME=ssl-nginx-renew   MODE=nginx
 ```
 
 ### 部署到第二台机器时，只需要改两处 + 一行钩子开关
@@ -67,9 +58,10 @@ sed -i 's/^RELOAD_MODE="none"/RELOAD_MODE="nginx"/' renewpost.sh
 > 是 `ssl.conf` 里的 `SSL_UNIT_NAME`，不是目录名 —— 两台服务器上的目录**可以都叫
 > `/opt/ssl`**，配置不同而已。
 >
-> **仓库里的 `scripts/ssl-nginx/` 已经删掉了**（它里面只剩一份 `ssl.conf`，差异已并入
-> 本目录 `ssl.conf` 的注释）。服务器上那个目录**不改名也能继续跑**，但下次升级时直接从
-> `scripts/ssl/` 传文件过去，两台机器就都只剩一套代码了。
+> **仓库里 `scripts/ssl-nginx/` 已删除，`scripts/ssl/` 这一层也扁平化了** —— 所有文件
+> 现在直接铺在 `scripts/` 下。服务器上旧的 `ssl/` / `ssl-nginx/` 目录**不改名也能继续跑**
+> （unit 名只看 `SSL_UNIT_NAME`，与目录名无关），但下次升级时改成从仓库 `scripts/`
+> 直接传过去，两台机器就都只剩一套代码了。
 >
 > 具体到你的两台机器：
 >
@@ -106,7 +98,7 @@ sed -i 's/^RELOAD_MODE="none"/RELOAD_MODE="nginx"/' renewpost.sh
 <项目根>/
 ├── .gitignore                     # 排除 secrets.env / renewpost.sh 与所有证书/私钥
 ├── .gitattributes                 # ★ 强制 *.sh 为 LF 行尾（Windows 开发必看第十二节）
-└── scripts/ssl/                   # ★ 唯一的一套代码
+└── scripts/                       # ★ 全部代码与配置都在这一层，没有 ssl/ 子目录
     ├── README.md                  # 本文件
     ├── lib.sh                     # 共用函数库（不直接执行）
     │                              #   ★ 服务商规格表 PROVIDER_SPECS 在这里
@@ -159,10 +151,10 @@ sed -i 's/^RELOAD_MODE="none"/RELOAD_MODE="nginx"/' renewpost.sh
 
 ```bash
 # 本地项目根目录
-scp -r scripts/ssl root@<你的服务器IP>:/opt/your-project/scripts/
+scp -r scripts/* root@<你的服务器IP>:/opt/your-project/scripts/
 
 # 登录服务器后补上权限与行尾（scp 不保证这两项）
-cd /opt/your-project/scripts/ssl
+cd /opt/your-project/scripts
 chmod +x ssl-issue.sh ssl-status.sh ssl-setup.sh ssl-repair.sh
 [ -f renewpost.sh ] && chmod +x renewpost.sh
 sed -i 's/\r$//' *.sh
@@ -400,9 +392,9 @@ shop.com www.shop.com         | dns=godaddy     # GoDaddy 的，再一张 ✔
 并列出所有可用账号和完整的变量配方，绝不带着错配置往下跑：
 
 ```
-✘ domains.conf：zzz.com 指定了 dns=godaddy account=NOPE，但 scripts/ssl/secrets.env 里没有这个组合
+✘ domains.conf：zzz.com 指定了 dns=godaddy account=NOPE，但 scripts/secrets.env 里没有这个组合
 ✘ 已定义的账号：tencent:default tencent:ACC2 godaddy:default
-  在 scripts/ssl/secrets.env 里补一组配对的变量（后缀必须和 account= 完全一致）：
+  在 scripts/secrets.env 里补一组配对的变量（后缀必须和 account= 完全一致）：
       tencent default ： Tencent_SecretId / Tencent_SecretKey
       tencent 其他    ： Tencent_SecretId_<账号名> / Tencent_SecretKey_<账号名>
       godaddy default ： GD_Key / GD_Secret
@@ -488,7 +480,7 @@ journalctl -u <SSL_UNIT_NAME>.service -n 100 --no-pager   # 看这一次的完�
 > `ssl-status.sh` 的「自动续期」栏已经做了三段判断（未安装 / 未启用 / 未运行）。
 
 > 如果不想用 systemd，加 `--no-timer`，然后自己挂 cron：
-> `17 3 * * * /opt/your-project/scripts/ssl/ssl-issue.sh >/dev/null 2>&1`
+> `17 3 * * * /opt/your-project/scripts/ssl-issue.sh >/dev/null 2>&1`
 > **但不要同时保留 acme.sh 自带的 crontab** —— 脚本会自动 `--uninstall-cronjob` 掉它，避免两套调度打架。
 
 ### 装重了怎么办：`ssl-repair.sh`
@@ -920,7 +912,7 @@ bash: ./ssl-issue.sh: /bin/bash^M: bad interpreter: No such file or directory
 用 `scp` / 压缩包手工拷贝而不是 `git clone` 时，记得先修一次：
 
 ```bash
-sed -i 's/\r$//' scripts/ssl/*.sh && chmod +x scripts/ssl/*.sh
+sed -i 's/\r$//' scripts/*.sh && chmod +x scripts/*.sh
 ```
 
 ---
@@ -997,7 +989,7 @@ sed -i 's/\r$//' scripts/ssl/*.sh && chmod +x scripts/ssl/*.sh
 
 - `secrets.env` 是**唯一**的敏感文件：只放 DNS 服务商的 API 凭据（可以多服务商、多账号），
   权限 600，已被 `.gitignore` 排除。脚本每次运行都会检查它的权限，过宽会告警。
-  `.gitignore` 里还用了 `scripts/ssl*/secrets.env` 通配兜底 —— 以后新开的套件目录也自动覆盖。
+  `.gitignore` 里用 `**/secrets.env` 通配兜底 —— 目录层级以后再变也不会漏。
 - `renewpost.sh` 虽然不含密钥，但记录了你服务器的目录结构和服务名，同样已被 `.gitignore`
   排除；仓库里只放 `renewpost.sh.example` 这一个通用模板（`RELOAD_MODE` 四选一）。
 - `renew.log` 只记录张数、时间、模式，**不含任何密钥**，且位于证书目录（已被 gitignore）。
@@ -1015,8 +1007,8 @@ sed -i 's/\r$//' scripts/ssl/*.sh && chmod +x scripts/ssl/*.sh
   这样一个账号的密钥泄露不会波及另一个账号。
 - 验证凭据确实没进版本库：
   ```bash
-  git check-ignore -v scripts/ssl/secrets.env   # 应输出忽略规则
-  git check-ignore -v scripts/ssl/renewpost.sh  # 应输出忽略规则
+  git check-ignore -v scripts/secrets.env   # 应输出忽略规则
+  git check-ignore -v scripts/renewpost.sh  # 应输出忽略规则
   git grep -n 'AKID' $(git rev-list --all) 2>/dev/null   # 应无输出
   ```
 

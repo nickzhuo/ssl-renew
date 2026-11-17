@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 #  证书到期时间总览
-#  scripts/ssl/ssl-status.sh
+#  scripts/ssl-status.sh
 #
 #  逐个域名列出：到期时间、剩余天数、本证书的续期阈值、状态、下次自动续期时间。
 #  只读取，不修改任何东西 —— 随时可以跑。
@@ -32,9 +32,9 @@ usage() {
   选项:
     --detail            额外显示每张证书的详细信息
     --quiet             只输出一行汇总（适合监控脚本 / 定时巡检）
-    --secrets <文件>    指定密钥文件， 默认 scripts/ssl/secrets.env
-    --domains <文件>    指定域名列表， 默认 scripts/ssl/domains.conf
-    --policy  <文件>    指定策略文件， 默认 scripts/ssl/ssl.conf
+    --secrets <文件>    指定密钥文件， 默认 scripts/secrets.env
+    --domains <文件>    指定域名列表， 默认 scripts/domains.conf
+    --policy  <文件>    指定策略文件， 默认 scripts/ssl.conf
     -h, --help          显示本帮助
 
 EOF

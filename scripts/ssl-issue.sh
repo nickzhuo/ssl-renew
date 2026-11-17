@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 #  批量证书签发 / 续期（DNS-01 验证）
-#  scripts/ssl/ssl-issue.sh
+#  scripts/ssl-issue.sh
 #
 #  逐个处理 domains.conf 里的每一张证书：
 #    ① 发起 ACME 请求  →  ② DNS 域名验证（自动增删 _acme-challenge TXT）→  ③ 部署证书
@@ -13,7 +13,7 @@
 #  ★ 续期决策由本脚本自己做，用的是每张证书自己的 renew 阈值，
 #    不依赖 acme.sh 的内部调度。未到期的证书直接跳过，不会白跑 acme.sh。
 #
-#  ★ 续期后置动作：如果确实有证书被更新，会执行 scripts/ssl/renewpost.sh
+#  ★ 续期后置动作：如果确实有证书被更新，会执行 scripts/renewpost.sh
 #    （自动发现，不需要配 ssl.conf）。拿它重启 docker compose 服务、重启 nginx
 #    之类的都可以 —— 模板见 renewpost.sh.example（顶部 RELOAD_MODE 四选一：
 #
@@ -93,9 +93,9 @@ usage() {
     --force             忽略剩余天数，强制重签（配合 --domain 可只强签一张）
     --staging           使用 Let's Encrypt 测试环境（调试用）
     --debug             打开 acme.sh 调试输出
-    --secrets <文件>    指定密钥文件，   默认 scripts/ssl/secrets.env
-    --domains <文件>    指定域名列表，   默认 scripts/ssl/domains.conf
-    --policy  <文件>    指定策略文件，   默认 scripts/ssl/ssl.conf
+    --secrets <文件>    指定密钥文件，   默认 scripts/secrets.env
+    --domains <文件>    指定域名列表，   默认 scripts/domains.conf
+    --policy  <文件>    指定策略文件，   默认 scripts/ssl.conf
     -h, --help          显示本帮助
 
   配置文件的分工:
@@ -116,7 +116,7 @@ usage() {
     域名跨服务商 / 跨账号时，请拆成两行，各自带上 dns= 和 account=。
 
   续期后置动作:
-    某张证书被更新并部署成功后，会自动执行 scripts/ssl/renewpost.sh
+    某张证书被更新并部署成功后，会自动执行 scripts/renewpost.sh
     （不需要在 ssl.conf 里配；模板见 renewpost.sh.example，顶部 RELOAD_MODE 四选一）。
     拿它重启 docker compose 服务、重启 nginx 之类的都可以。
     全部证书都在有效期内时不会执行 —— 不会白重启服务。
@@ -731,7 +731,7 @@ main() {
     printf '\n  %s失败 %d 项：%s\n' "$C_RED$C_BLD" "${#FAILURES[@]}" "$C_RST"
     local f
     for f in "${FAILURES[@]}"; do printf '    ✘ %s\n' "$f"; done
-    printf '\n  排障见 scripts/ssl/README.md\n\n'
+    printf '\n  排障见 scripts/README.md\n\n'
     exit 1
   fi
 

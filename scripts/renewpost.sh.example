@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 #  续期后置钩子（唯一模板）—— 证书更新后让服务用上新证书
-#  scripts/ssl/renewpost.sh.example
+#  scripts/renewpost.sh.example
 #
 #  用法：
 #      cp renewpost.sh.example renewpost.sh

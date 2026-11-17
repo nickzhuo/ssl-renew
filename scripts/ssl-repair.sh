@@ -1,10 +1,10 @@
 #!/bin/bash
 # =============================================================================
 #  证书续期定时器 —— 体检 / 冲突分析 / 收敛成一个
-#  scripts/ssl/ssl-repair.sh
+#  scripts/ssl-repair.sh
 #
 #  背景（为什么会装上两个）
-#    本套证书工具只有**一套代码**（scripts/ssl/），靠 ssl.conf 的
+#    本套证书工具只有**一套代码**（scripts/），靠 ssl.conf 的
 #    SSL_UNIT_NAME 区分不同机器 / 不同消费方：
 #        Traefik 机器   SSL_UNIT_NAME="ssl-renew"        unit ssl-renew.*
 #        nginx   机器   SSL_UNIT_NAME="ssl-nginx-renew"  unit ssl-nginx-renew.*
