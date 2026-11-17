@@ -25,10 +25,10 @@
 
 ## 〇、一套代码，两种消费方（先读这一节）
 
-以前是 `scripts/ssl/`（Traefik 版）和 `scripts/ssl-nginx/`（nginx 版）**两份目录**，
-代码 99% 相同，只是三处不同。两份并排维护的代价是每次改逻辑都要改两遍、
-并且**复制目录时一定会漏改某处**（真漏过：`ssl-status.sh` 里写死的 unit 名没跟着改，
-状态检查一直去查另一套的 unit，报「未安装」，白误导了一轮排查）。
+以前是两份目录（一份管 Traefik、一份管 nginx），代码 99% 相同，只是三处不同。
+两份并排维护的代价是每次改逻辑都要改两遍、并且**复制目录时一定会漏改某处**
+（真漏过：`ssl-status.sh` 里写死的 unit 名没跟着改，状态检查一直去查另一套的 unit，
+报「未安装」，白误导了一轮排查）。
 
 现在收敛成一套：**代码只此一份，钩子模板也只此一份，目录只有一层，差异全部外置成配置。**
 
@@ -58,10 +58,9 @@ sed -i 's/^RELOAD_MODE="none"/RELOAD_MODE="nginx"/' renewpost.sh
 > 是 `ssl.conf` 里的 `SSL_UNIT_NAME`，不是目录名 —— 两台服务器上的目录**可以都叫
 > `/opt/ssl`**，配置不同而已。
 >
-> **仓库里 `scripts/ssl-nginx/` 已删除，`scripts/ssl/` 这一层也扁平化了** —— 所有文件
-> 现在直接铺在 `scripts/` 下。服务器上旧的 `ssl/` / `ssl-nginx/` 目录**不改名也能继续跑**
-> （unit 名只看 `SSL_UNIT_NAME`，与目录名无关），但下次升级时改成从仓库 `scripts/`
-> 直接传过去，两台机器就都只剩一套代码了。
+> **脚本目录只有一层 `scripts/`。** 服务器上如果还留着旧的子目录（`ssl/` 之类），
+> **不改名也能继续跑** —— unit 名只看 `SSL_UNIT_NAME`，与目录名无关；
+> 但下次升级时直接从仓库 `scripts/` 传文件过去，两台机器就都只剩一套。
 >
 > 具体到你的两台机器：
 >
@@ -96,9 +95,12 @@ sed -i 's/^RELOAD_MODE="none"/RELOAD_MODE="nginx"/' renewpost.sh
 
 ```
 <项目根>/
+├── README.md                      # 入口文档（总览 / 快速上手 / 运维手册）
 ├── .gitignore                     # 排除 secrets.env / renewpost.sh 与所有证书/私钥
 ├── .gitattributes                 # ★ 强制 *.sh 为 LF 行尾（Windows 开发必看第十二节）
-└── scripts/                       # ★ 全部代码与配置都在这一层，没有 ssl/ 子目录
+├── ssl/                           # ★ 证书输出目录（SSL_OUTPUT_DIR="ssl"）
+│   └── .gitkeep                   #   产物全被 gitignore，只留这个占位
+└── scripts/                       # ★ 全部代码与配置都在这一层，脚本直接铺开
     ├── README.md                  # 本文件
     ├── lib.sh                     # 共用函数库（不直接执行）
     │                              #   ★ 服务商规格表 PROVIDER_SPECS 在这里

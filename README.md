@@ -17,15 +17,16 @@
 
 ### 1. 只有一套代码
 
-早期是 `scripts/ssl/`（Traefik 版）和 `scripts/ssl-nginx/`（nginx 版）两份目录，代码 99% 相同。
+早期是两份目录（一份管 Traefik、一份管 nginx），代码 99% 相同。
 两份并排维护的代价是**每次改逻辑都要改两遍，而且复制目录时一定会漏改某处**
 （真漏过：`ssl-status.sh` 里写死的 unit 名没跟着改，状态检查一直去查另一套的 unit，
 报「未安装」，白误导了一轮排查）。
 
-现在收敛成一套：**代码只此一份、目录也只有一层，差异全部外置成配置**。
+后来发现差异只有三项（输出目录 / unit 名 / 钩子动作），全部能外置成配置 ——
+于是合成一套，目录也只留一层。
 
 ```
-scripts/                        ← 唯一的一套代码，没有 ssl/ 子目录
+scripts/                        ← 唯一的一套代码，脚本直接铺在这层
   │  读 ssl.conf + renewpost.sh 的 RELOAD_MODE
   ├─▶ Traefik 机器   SSL_OUTPUT_DIR=/root/cert        SSL_UNIT_NAME=ssl-renew         MODE=traefik
   └─▶ nginx   机器   SSL_OUTPUT_DIR=/etc/nginx/ssl    SSL_UNIT_NAME=ssl-nginx-renew   MODE=nginx
@@ -74,7 +75,9 @@ sed -i 's/^RELOAD_MODE="none"/RELOAD_MODE="nginx"/' renewpost.sh
 ├── README.md                      # 本文件：总览 / 快速上手 / 运维手册
 ├── .gitattributes                 # ★ 强制 *.sh 为 LF 行尾（Windows 开发必看）
 ├── .gitignore                     # 排除 secrets.env / renewpost.sh 与所有证书私钥
-└── scripts/                       # ★ 全部代码与配置都在这一层，没有 ssl/ 子目录
+├── ssl/                           # ★ 证书输出目录（ssl.conf 里 SSL_OUTPUT_DIR="ssl"）
+│   └── .gitkeep                   #   签发产物全被 gitignore，只留这个占位
+└── scripts/                       # ★ 全部代码与配置都在这一层，脚本直接铺开
     ├── README.md                  # 详细文档（十五节，1100+ 行）
     ├── lib.sh                     # 共用函数库（不直接执行）★ 服务商规格表在这里
     ├── ssl-issue.sh               # 批量签发 / 续期
@@ -90,9 +93,10 @@ sed -i 's/^RELOAD_MODE="none"/RELOAD_MODE="nginx"/' renewpost.sh
     └── dynamic_conf.toml          # Traefik 消费方配置参考（本地留档，防重装丢失）
 ```
 
-> **没有 `scripts/ssl/` 这一层。** 以前有两台机器就有两个目录（`ssl/` 和 `ssl-nginx/`），
-> 后来发现差异只有「输出目录 / unit 名 / 钩子动作」三项 —— 全部能外置成配置，
-> 于是所有文件直接铺在 `scripts/` 下，一套代码管所有机器。
+> **根目录只有三样：`README.md`、`ssl/`（证书）、`scripts/`（脚本）。**
+> 没有 `scripts/ssl/` 这一层 —— 以前两台机器就是两个目录，后来发现差异只有
+> 「输出目录 / unit 名 / 钩子动作」三项，全部能外置成配置，于是所有文件直接铺在
+> `scripts/` 下，一套代码管所有机器。
 
 证书输出（`flat` 布局，`SSL_OUTPUT_DIR` 下的样子）：
 
@@ -166,7 +170,11 @@ Tencent_SecretKey="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 ```bash
 SSL_EMAIL="you@example.com"          # ACME 账号邮箱，必填
 
-SSL_OUTPUT_DIR="/root/cert"          # Traefik 机器；nginx 机器写 /etc/nginx/ssl
+# 证书落到哪：
+#   仓库默认 "ssl"          ⇒ <项目根>/ssl/（相对路径，相对 scripts/ 的上一级）
+#   Traefik 机器写          "/root/cert"
+#   nginx   机器写          "/etc/nginx/ssl"
+SSL_OUTPUT_DIR="ssl"
 SSL_UNIT_NAME="ssl-renew"            # Traefik 机器；nginx 机器写 ssl-nginx-renew
 
 SSL_OUTPUT_LAYOUT="flat"             # flat 布局：<域名>.fullchain.pem

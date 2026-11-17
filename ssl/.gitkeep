@@ -1,0 +1,7 @@
+# 证书输出目录（ssl.conf 里 SSL_OUTPUT_DIR="ssl" ⇒ <项目根>/ssl/）
+#
+# ssl-issue.sh 跑起来后会在这里生成：
+#   <域名>.fullchain.pem / .privkey.pem / .cert.pem / .chain.pem / renew.log
+#
+# 内容已被 .gitignore 排除（ssl/*  +  !ssl/.gitkeep），只保留本文件占位。
+# 生产服务器上通常改用绝对路径（例如 /root/cert），由各机器的 ssl.conf 决定。

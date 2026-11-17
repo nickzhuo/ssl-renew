@@ -22,6 +22,11 @@
 #   否定规则必须紧跟在忽略规则**之后**，否则不生效。
 !**/renewpost.sh.example
 
+# 证书输出目录（ssl.conf 里 SSL_OUTPUT_DIR="ssl" ⇒ <项目根>/ssl/）
+# 只保留占位文件，签发产物一律不入库
+ssl/*
+!ssl/.gitkeep
+
 # 证书、私钥、证书链、PFX
 *.pem
 *.key
