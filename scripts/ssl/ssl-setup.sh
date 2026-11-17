@@ -5,7 +5,7 @@
 #
 #  它做的事：
 #    1. 生成 secrets.env（只放 DNS 服务商的 API 凭据）并锁死权限 600
-#    1.5 生成续期后置钩子 renewpost.sh（证书更新后要做什么，自己挑模板）
+#    1.5 生成续期后置钩子 renewpost.sh（按本机情况自动选 RELOAD_MODE）
 #    2. 检查 domains.conf 的域名列表和 ssl.conf 的邮箱
 #    3. 环境体检（配置 / 网络 / NS 归属）
 #    4. 首次签发：遍历域名列表，逐张签发并部署到证书目录
@@ -33,13 +33,11 @@ STATUS_SH="${SCRIPT_DIR}/ssl-status.sh"
 ENV_FILE="${SCRIPT_DIR}/secrets.env"
 ENV_EXAMPLE="${SCRIPT_DIR}/secrets.env.example"
 HOOK_FILE="${SCRIPT_DIR}/renewpost.sh"
-# 仓库里带两个钩子模板，按这台机器实际跑什么来选：
-#   .example.nginx   nginx -t → systemctl restart nginx → is-active
-#   .example.docker  docker compose up --force-recreate → 校验容器 running
-HOOK_EXAMPLE_NGINX="${SCRIPT_DIR}/renewpost.sh.example.nginx"
-HOOK_EXAMPLE_DOCKER="${SCRIPT_DIR}/renewpost.sh.example.docker"
+# 仓库里只有**一个**钩子模板，用 RELOAD_MODE 决定行为（none / nginx / traefik / compose）。
+# 这里按本机检测结果把它复制过来、并把 MODE 写成检测到的值，省得你手工改。
+HOOK_EXAMPLE="${SCRIPT_DIR}/renewpost.sh.example"
 
-# 只有检测到这个 docker compose 项目目录存在时，才会自动生成 docker 版钩子 ——
+# 只有检测到这个 docker compose 项目目录存在时，才会自动生成容器类钩子 ——
 # 免得在没有这个项目的机器上生成一个必然失败的钩子。
 DEFAULT_COMPOSE_DIR="/root/docker/api"
 
@@ -166,32 +164,57 @@ step "续期后置钩子"
 if [ -f "$HOOK_FILE" ]; then
   chmod +x "$HOOK_FILE" 2>/dev/null || true
   ok "已存在：${HOOK_FILE}（不动它，你自己维护）"
-else
-  hook_src=""
-  if command -v nginx >/dev/null 2>&1 || [ -x /usr/sbin/nginx ] || [ -x /usr/bin/nginx ]; then
-    if [ -f "$HOOK_EXAMPLE_NGINX" ]; then hook_src="$HOOK_EXAMPLE_NGINX"; fi
+  # 顺手把当前模式念出来 —— 这台机器到底会不会重载、重载什么，一眼可查
+  hook_mode="$(sed -n 's/^RELOAD_MODE="\(.*\)".*$/\1/p' "$HOOK_FILE" | head -n1)"
+  if [ -n "$hook_mode" ]; then
+    info "当前 RELOAD_MODE=${hook_mode}"
+  else
+    info "没读到 RELOAD_MODE —— 这可能是旧版模板（.example.nginx / .example.docker 时代）"
+    info "新版用一个 RELOAD_MODE 区分行为，见 ${HOOK_EXAMPLE}"
   fi
-  if [ -z "$hook_src" ] && [ -d "$DEFAULT_COMPOSE_DIR" ] && [ -f "$HOOK_EXAMPLE_DOCKER" ]; then
-    hook_src="$HOOK_EXAMPLE_DOCKER"
+else
+  # 检测顺序：
+  #   ① 有 nginx 可执行文件        → nginx 机器（证书就是给 nginx 用的，优先）
+  #   ② compose 项目里有 Traefik 动态配置 → traefik 机器（走热加载，无中断）
+  #   ③ 只有 compose 项目目录      → 普通容器服务（走 force-recreate）
+  hook_mode=""
+  if command -v nginx >/dev/null 2>&1 || [ -x /usr/sbin/nginx ] || [ -x /usr/bin/nginx ]; then
+    hook_mode="nginx"
+  elif [ -f "${DEFAULT_COMPOSE_DIR}/dynamic_conf.toml" ]; then
+    hook_mode="traefik"
+  elif [ -d "$DEFAULT_COMPOSE_DIR" ]; then
+    hook_mode="compose"
   fi
 
-  if [ -n "$hook_src" ]; then
-    cp "$hook_src" "$HOOK_FILE"
+  if [ -n "$hook_mode" ] && [ -f "$HOOK_EXAMPLE" ]; then
+    sed "s/^RELOAD_MODE=\"none\"/RELOAD_MODE=\"${hook_mode}\"/" "$HOOK_EXAMPLE" > "$HOOK_FILE"
     chmod +x "$HOOK_FILE"
-    ok "已生成：${HOOK_FILE}（模板 $(basename "$hook_src")）"
-    case "$hook_src" in
-      *.nginx)  info "证书更新后会自动执行：nginx -t && systemctl restart nginx" ;;
-      *.docker) info "证书更新后会自动执行：cd ${DEFAULT_COMPOSE_DIR} && docker compose up --force-recreate -d --no-deps <服务名>" ;;
-    esac
-    info "服务名 / 目录不对就改 ${HOOK_FILE} 顶部的配置区"
+    # ★ 后验：模板默认值将来若改名，sed 会**静默不替换** —— 那会生成一个
+    #   "看起来有钩子、实际 RELOAD_MODE 还是 none" 的文件，是最难发现的失败模式。
+    #   注意：核对不过时**不能**再打印"已生成（RELOAD_MODE=xxx）"，那是假话。
+    if grep -q "^RELOAD_MODE=\"${hook_mode}\"" "$HOOK_FILE"; then
+      ok "已生成：${HOOK_FILE}（RELOAD_MODE=${hook_mode}）"
+      case "$hook_mode" in
+        nginx)   info "证书更新后会自动执行：nginx -t && systemctl restart nginx" ;;
+        traefik) info "证书更新后会自动执行：写 ${DEFAULT_COMPOSE_DIR}/dynamic_conf.toml 触发热加载，核对线上证书 serial" ;;
+        compose) info "证书更新后会自动执行：cd ${DEFAULT_COMPOSE_DIR} && docker compose up --force-recreate -d --no-deps <服务名>" ;;
+      esac
+    else
+      warn "已生成 ${HOOK_FILE}，但 RELOAD_MODE 没写对（模板默认值可能变了）"
+      warn "  请手工把它改成：RELOAD_MODE=\"${hook_mode}\""
+    fi
+    info "路径 / 服务名不对就改 ${HOOK_FILE} 顶部的配置区"
     info "改完先自测：bash ${HOOK_FILE} --dry-run"
   else
     info "没检测到 nginx，也没检测到 ${DEFAULT_COMPOSE_DIR}，暂不生成 renewpost.sh"
-    info "证书更新后要做什么，自己挑一个模板复制过来（然后改顶部配置区）："
-    info "  重启 nginx   ： cp ${HOOK_EXAMPLE_NGINX} ${HOOK_FILE}"
-    info "  重建容器     ： cp ${HOOK_EXAMPLE_DOCKER} ${HOOK_FILE}"
-    info "  其它         ： 照着模板写，脚本会自动发现 ${HOOK_FILE}"
-    info "  chmod +x ${HOOK_FILE} && bash ${HOOK_FILE} --dry-run"
+    info "证书更新后要做什么，自己挑一个模式（模板里 RELOAD_MODE 四选一）："
+    info "  none     什么都不做（也可以干脆不建这个文件）"
+    info "  nginx    nginx -t → systemctl restart nginx → 校验 is-active"
+    info "  traefik  写动态配置触发热加载 → 核对线上证书 serial（无中断）"
+    info "  compose  docker compose up --force-recreate → 校验容器 running"
+    info "  用法：cp ${HOOK_EXAMPLE} ${HOOK_FILE}"
+    info "        sed -i 's/^RELOAD_MODE=\"none\"/RELOAD_MODE=\"traefik\"/' ${HOOK_FILE}"
+    info "        chmod +x ${HOOK_FILE} && bash ${HOOK_FILE} --dry-run"
   fi
 fi
 
@@ -314,12 +337,14 @@ printf '    看历史运行摘要           cat %s\n' "${SSL_DIR}/renew.log"
 
 printf '\n  %s续期后置钩子%s %s\n' "$C_BLD" "$C_RST" "$HOOK_FILE"
 if [ -f "$HOOK_FILE" ]; then
-  printf '    证书有更新时自动执行它；先空跑确认：bash %s --dry-run\n' "$HOOK_FILE"
+  hook_mode="$(sed -n 's/^RELOAD_MODE="\(.*\)".*$/\1/p' "$HOOK_FILE" | head -n1)"
+  printf '    模式 %s；证书有更新时自动执行它\n' "${hook_mode:-（未读到，可能是旧版模板）}"
+  printf '    先空跑确认：bash %s --dry-run\n' "$HOOK_FILE"
 else
-  printf '    未生成。需要时挑一个模板：\n'
-  printf '      cp %s %s\n' "$HOOK_EXAMPLE_NGINX" "$HOOK_FILE"
-  printf '      cp %s %s\n' "$HOOK_EXAMPLE_DOCKER" "$HOOK_FILE"
-  printf '      chmod +x %s\n' "$HOOK_FILE"
+  printf '    未生成（本机不需要重载时不建它也可以）。需要时：\n'
+  printf '      cp %s %s\n' "$HOOK_EXAMPLE" "$HOOK_FILE"
+  printf '      # 然后按需要把 RELOAD_MODE 改成 nginx / traefik / compose\n'
+  printf '      chmod +x %s && bash %s --dry-run\n' "$HOOK_FILE" "$HOOK_FILE"
 fi
 
 printf '\n  %s新增域名只需两步%s\n' "$C_BLD" "$C_RST"

@@ -15,7 +15,7 @@
 #
 #  ★ 续期后置动作：如果确实有证书被更新，会执行 scripts/ssl/renewpost.sh
 #    （自动发现，不需要配 ssl.conf）。拿它重启 docker compose 服务、重启 nginx
-#    之类的都可以 —— 模板见 renewpost.sh.example.docker / .example.nginx。
+#    之类的都可以 —— 模板见 renewpost.sh.example（顶部 RELOAD_MODE 四选一：
 #
 #  ★ 每次运行都会往 <证书目录>/renew.log 追加一行结果摘要，
 #    因为 CentOS 8 的 systemd journal 默认不持久化，重启就查不到历史了。
@@ -117,7 +117,7 @@ usage() {
 
   续期后置动作:
     某张证书被更新并部署成功后，会自动执行 scripts/ssl/renewpost.sh
-    （不需要在 ssl.conf 里配；模板见 renewpost.sh.example.docker / .example.nginx）。
+    （不需要在 ssl.conf 里配；模板见 renewpost.sh.example，顶部 RELOAD_MODE 四选一）。
     拿它重启 docker compose 服务、重启 nginx 之类的都可以。
     全部证书都在有效期内时不会执行 —— 不会白重启服务。
 
@@ -683,7 +683,7 @@ main() {
     else
       warn "有证书被更新，但既没找到 renewpost.sh，也没配 SSL_RELOAD_CMD ——"
       warn "  服务不会自动用上新证书。建议创建：${SSL_LIB_DIR}/renewpost.sh"
-      warn "  模板在：${SSL_LIB_DIR}/renewpost.sh.example.docker （或 .example.nginx）"
+      warn "  模板在：${SSL_LIB_DIR}/renewpost.sh.example（RELOAD_MODE 选 nginx / traefik / compose）"
       POST_HOOK_STATE="未配置"
     fi
   fi

@@ -1,0 +1,423 @@
+#!/bin/bash
+# =============================================================================
+#  续期后置钩子（唯一模板）—— 证书更新后让服务用上新证书
+#  scripts/ssl/renewpost.sh.example
+#
+#  用法：
+#      cp renewpost.sh.example renewpost.sh
+#      vi renewpost.sh                  # 只改「配置区」：RELOAD_MODE + 对应模式那几行
+#      chmod +x renewpost.sh
+#      bash renewpost.sh --dry-run      # 先空跑确认，再交给定时任务
+#
+#  ★ 这是【服务器本地文件】，不进 git —— .gitignore 已排除 renewpost.sh。
+#    仓库里只有这一个模板，所有服务器共用，差异只体现在顶部的 RELOAD_MODE。
+#    升级脚本时不会覆盖你机器上的 renewpost.sh。
+#
+#  什么时候执行：
+#      ssl-issue.sh 判定某张证书需要签发/续期 → 签发成功 → 部署到证书目录之后。
+#      全部证书都还没到期时**不会**执行 —— 不会白重启一次服务。
+#
+#  为什么不用 ssl.conf 里的 SSL_RELOAD_CMD：
+#      钩子是一段完整脚本，能做「先验配置 → 再重载 → 最后校验」这一串动作，
+#      一行命令写不下这些。ssl-issue.sh 会**自动发现**本文件，ssl.conf 不用改。
+#
+#  ★ 执行环境（最容易踩的坑）：
+#      由 systemd 的 <SSL_UNIT_NAME>.service 触发时，进程 PATH 是精简过的
+#      （/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin），
+#      而你手工登录 SSH 时 PATH 里往往还有别的东西。
+#      所以下面不直接写命令名，先探测真实路径；探不到再用 *_BIN 覆盖项写死。
+# =============================================================================
+
+set -euo pipefail
+
+
+# =============================================================================
+#  配置区 —— 只需要改这里
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+#  1. 选模式   ★ 整个文件只改这一行就够（除非要填下面的路径）
+# -----------------------------------------------------------------------------
+RELOAD_MODE="none"
+
+#   none     什么都不做。
+#            **如果你确实不需要任何后置动作，最干净的做法是干脆不创建这个
+#            文件** —— ssl-issue.sh 自动发现，没有就跳过，不会报警。
+#            留这个分支只是为了「先复制过来、以后再配」时不至于报错。
+#
+#   nginx    本机跑 nginx：
+#              nginx -t  →  systemctl restart nginx  →  校验 is-active
+#
+#   traefik  本机跑 Traefik 容器（★ 无中断，推荐给 Traefik 机器）：
+#              写一次动态配置触发热加载 → 比对线上证书 serial
+#              → 热加载没生效再退回重启容器
+#            这条路要求 Traefik 挂了动态配置目录且 watch=true。
+#
+#   compose  本机跑其它容器服务（没有动态配置可写时用它）：
+#              docker compose up --force-recreate  →  校验容器 running
+#            比 traefik 重，会有 1~2 秒中断。
+
+
+# -----------------------------------------------------------------------------
+#  2. [nginx 模式] 配置
+# -----------------------------------------------------------------------------
+#  nginx 的 systemd 服务名（绝大多数发行版就是 nginx）
+NGINX_SERVICE="nginx"
+
+#  证书更新后怎么让 nginx 用上新证书：
+#      restart = 完全重启（★ 默认，证书轮换就用它）
+#      reload  = 平滑重载、不断现有连接。原理上 reload 也会重读证书，
+#                但**实测有"看起来没生效"的情况**，两个原因：
+#                  ① 旧 worker 要等手上的长连接（keepalive / WebSocket / 长轮询）
+#                     处理完才退出，worker_shutdown_timeout 默认无限等 ——
+#                     这些残留 worker 手里拿的还是旧证书，新连接落到它们身上就是老证书；
+#                  ② ssl_session_cache 是跨 worker 共享的，reload 不清它，
+#                     老客户端复用会话时根本不做证书交换。
+#                ⇒ **证书轮换请用 restart**（中断通常 < 1 秒，换来的是确定性）。
+#                   确实要零中断再选 reload，但换完必须实测验证：
+#                     echo | openssl s_client -connect <域名>:443 -servername <域名> \
+#                       -no_ticket -no_reuse 2>/dev/null | openssl x509 -noout -dates
+#                   （-no_ticket -no_reuse 强制完整握手，否则会被会话复用骗到）
+NGINX_ACTION="restart"
+
+#  nginx 可执行文件。一般能自动找到；找不到时在这里写绝对路径，例如 "/usr/sbin/nginx"
+NGINX_BIN=""
+
+
+# -----------------------------------------------------------------------------
+#  3. [traefik 模式] 配置
+# -----------------------------------------------------------------------------
+#  Traefik 动态配置（里面用 [[tls.certificates]] 列着证书路径）。
+#  ★ 必须是 Traefik **实际在 watch 的那一份** —— 写它才产生重载事件。
+TRAEFIK_CONF="/root/docker/api/dynamic_conf.toml"
+
+#  证书落盘目录（和 ssl.conf 的 SSL_OUTPUT_DIR 保持一致）。
+#  ★ 只能填 fly 布局的目录（里面直接是 <域名>.fullchain.pem）；
+#    ssl.conf 若设了 SSL_OUTPUT_LAYOUT="subdir"，这个模式的域名扫描要另行改。
+TRAEFIK_CERT_DIR="/root/cert"
+
+#  Traefik 容器名（docker ps 里看到的那个）
+TRAEFIK_CONTAINER="api_proxy_1"
+
+#  本机 Traefik 的 https 端口，用于回连核对证书 serial
+TRAEFIK_PORT="443"
+
+
+# -----------------------------------------------------------------------------
+#  4. [compose 模式] 配置
+# -----------------------------------------------------------------------------
+#  docker compose 项目目录（里面要有 docker-compose.yml 或 compose.yml）
+COMPOSE_DIR="/root/docker/api"
+
+#  证书更新后要重建的服务名（docker-compose.yml 里 services: 下的名字，**不是**容器名）
+COMPOSE_SERVICE="proxy"
+
+#  传给 compose up 的参数：
+#    --force-recreate  强制重建容器
+#                      （证书通常以文件挂载进容器，不重建的话某些情况下
+#                        容器不会重新读取挂载文件；重建最保险）
+#    -d                后台运行
+#    --no-deps         不连带重启依赖服务，只动这一个
+COMPOSE_ARGS="--force-recreate -d --no-deps"
+
+# -----------------------------------------------------------------------------
+#  5. 路径覆盖（一般不用填）
+# -----------------------------------------------------------------------------
+#  只有当 systemd 触发时报 "command not found"、而你确认它们装在非常规位置时，
+#  才在这里写绝对路径。留空 = 自动探测。
+DOCKER_BIN_OVERRIDE=""          # 例如 "/opt/docker/bin/docker"
+COMPOSE_BIN_OVERRIDE=""         # 例如 "/usr/local/bin/docker-compose"
+
+
+# =============================================================================
+#  以下不用改
+# =============================================================================
+
+DRY_RUN=0
+[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
+
+log()  { printf '  %s\n' "$*"; }
+fail() { printf '\n  ✘ %s\n\n' "$*" >&2; exit 1; }
+
+# systemd 触发时 PATH 是精简的，先 command -v，再兜常见安装位置
+find_bin() {
+  local name="$1" p
+  if command -v "$name" >/dev/null 2>&1; then
+    command -v "$name"
+    return 0
+  fi
+  for p in "/usr/bin/${name}" "/usr/local/bin/${name}" "/usr/sbin/${name}" \
+           "/sbin/${name}" "/snap/bin/${name}" "/opt/bin/${name}" \
+           "/usr/local/sbin/${name}" "/opt/nginx/sbin/${name}"; do
+    if [ -x "$p" ]; then
+      printf '%s' "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+
+# =============================================================================
+#  模式一：nginx
+# =============================================================================
+run_nginx() {
+  local bin="$NGINX_BIN"
+  if [ -z "$bin" ]; then
+    bin="$(find_bin nginx || true)"
+  fi
+  if [ -z "$bin" ]; then
+    printf '\n  ✘ 找不到 nginx 可执行文件。\n' >&2
+    printf '    排查：command -v nginx ; ls -l /usr/sbin/nginx\n' >&2
+    printf '    找到后把绝对路径写进本脚本配置区的 NGINX_BIN。\n\n' >&2
+    exit 127
+  fi
+  log "→ nginx：$bin"
+
+  # ★ 顺序很重要：nginx -t 会真正去加载 ssl_certificate / ssl_certificate_key，
+  #   证书文件缺失 / 路径写错 / 私钥读不了，这里就会报错。
+  #   放在重启**之前**，就能在"服务被打断"之前发现问题 ——
+  #   否则你会先把 nginx 重启坏，再回头查原因。
+  if [ "$DRY_RUN" = 1 ]; then
+    log "✔ dry-run：以下命令不会实际执行"
+    log "→ 将校验：$bin -t"
+    log "→ 将执行：systemctl $NGINX_ACTION $NGINX_SERVICE"
+    log "→ 将检查：systemctl is-active $NGINX_SERVICE"
+    return 0
+  fi
+
+  log "→ 校验配置：$bin -t"
+  if ! "$bin" -t; then
+    printf '\n  ✘ nginx 配置校验失败 —— 已中止，**没有**重启 nginx，现有服务不受影响。\n' >&2
+    printf '    常见原因：证书文件不存在 / 路径写错 / 私钥权限不足。\n' >&2
+    printf '    看上面 nginx -t 输出的那一行，它通常会直接指出是哪个文件。\n\n' >&2
+    exit 1
+  fi
+  log "✔ 配置校验通过（证书路径都读得到）"
+
+  log "→ 执行：systemctl $NGINX_ACTION $NGINX_SERVICE"
+  systemctl "$NGINX_ACTION" "$NGINX_SERVICE"
+
+  # ★ "命令返回 0" 只代表指令发出去了，不代表服务在跑。
+  #   证书换了但 nginx 没起来，是最难发现的失败模式 ——
+  #   监控看到的是"网站挂了"，根本不会往证书上想。
+  if ! systemctl is-active --quiet "$NGINX_SERVICE"; then
+    printf '\n  ✘ %s 不是 active 状态 —— 证书是新的，但服务没起来！\n' "$NGINX_SERVICE" >&2
+    systemctl status "$NGINX_SERVICE" --no-pager -l 2>&1 | sed 's/^/    /' >&2 || true
+    printf '\n' >&2
+    exit 1
+  fi
+
+  log "✔ $NGINX_SERVICE 已 $NGINX_ACTION 并处于 active 状态，新证书已生效"
+}
+
+
+# =============================================================================
+#  模式二：traefik（热加载）
+# =============================================================================
+#  Traefik 挂了动态配置目录并 watch=true，只要 dynamic_conf.toml 有**真实写入事件**
+#  就会重建证书库。但 Traefik 对"证书文件本身被替换"无感知，
+#  所以必须主动制造一次配置写入。
+#
+#  为什么用 sed -i 而不是 touch：
+#      sed -i 写临时文件再 rename，产生真实写入/重命名事件；touch 只改 mtime，
+#      Traefik 未必理会。内容一字节不变，git 工作区不会脏。
+run_traefik() {
+  local cert_dir="$TRAEFIK_CERT_DIR" conf="$TRAEFIK_CONF"
+  local container="$TRAEFIK_CONTAINER" port="$TRAEFIK_PORT"
+  local docker_bin domains=()
+
+  docker_bin="$DOCKER_BIN_OVERRIDE"
+  [ -n "$docker_bin" ] || docker_bin="$(find_bin docker || true)"
+  [ -n "$docker_bin" ] || docker_bin="/usr/bin/docker"
+  [ -x "$docker_bin" ] || fail "找不到 docker（traefik 模式热加载失败时要靠它重启容器）"
+
+  [ -f "$conf" ] || fail "Traefik 动态配置不存在：$conf（改配置区的 TRAEFIK_CONF）"
+  [ -d "$cert_dir" ] || fail "证书目录不存在：$cert_dir（改配置区的 TRAEFIK_CERT_DIR）"
+
+  # 以证书目录里的清单为准：以后加域名自动纳入，不用改脚本
+  while IFS= read -r f; do
+    domains+=("$(basename "$f" .fullchain.pem)")
+  done < <(find "$cert_dir" -maxdepth 1 -name '*.fullchain.pem' | sort)
+
+  if [ "${#domains[@]}" -eq 0 ]; then
+    if find "$cert_dir" -mindepth 2 -maxdepth 2 -name 'fullchain.pem' 2>/dev/null | head -n1 | grep -q .; then
+      fail "$cert_dir 下没有 *.fullchain.pem，但子目录里有 —— 这是 subdir 布局，traefik 模式只支持 flat。改配 ssl.conf 的 SSL_OUTPUT_LAYOUT，或改用 compose 模式。"
+    fi
+    fail "$cert_dir 下没有 *.fullchain.pem"
+  fi
+
+  # 比对「文件里的证书 serial」与「Traefik 实际下发的证书 serial」
+  check_all() {
+    local quiet="$1" d want got bad=0
+    for d in "${domains[@]}"; do
+      want="$(openssl x509 -in "$cert_dir/$d.fullchain.pem" -noout -serial | cut -d= -f2)"
+      got="$(echo | openssl s_client -connect "127.0.0.1:$port" -servername "$d" 2>/dev/null \
+              | openssl x509 -noout -serial 2>/dev/null | cut -d= -f2 || true)"
+      if [ "$want" != "$got" ]; then
+        bad=1
+        # 用 → 而不是 ✘：这里只是"还没重载，线上自然是旧证书"，属于预期状态。
+        # 真正的失败判定在重载后的 check_all 里做（那时不一致才是真失败）。
+        [ "$quiet" = 1 ] || log "→ $d：线上仍是旧证书，待重载后核对"
+      fi
+    done
+    [ "$bad" = 0 ]
+  }
+
+  log "共 ${#domains[@]} 个域名待核对"
+
+  if check_all 0; then
+    log "✔ 证书已是最新，无需动作"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" = 1 ]; then
+    log "dry-run：以上域名未生效，正式执行会触发重载（必要时重启容器）"
+    return 0
+  fi
+
+  # ---- 1. 触发重载：原样重写配置文件，内容不变但产生真实写入事件 ----
+  log "触发 Traefik 重载…"
+  sed -i 's/^# 证书配置$/# 证书配置/' "$conf" || true
+
+  # ---- 2. 等它生效，最多 10 轮 ----
+  local reloaded=0 i
+  for i in $(seq 1 10); do
+    sleep 1
+    if check_all 1; then reloaded=1; break; fi
+    printf '.'
+  done
+  [ "$reloaded" = 1 ] && printf '\n'
+
+  # ---- 3. 没生效就退回重启（1~2 秒中断，一年也就几次） ----
+  if [ "$reloaded" != 1 ]; then
+    printf '\n'
+    log "热加载未生效，退回重启 $container"
+    "$docker_bin" restart "$container" >/dev/null
+    sleep 6
+  fi
+
+  # ---- 4. 终检：仍不一致就报错退出，让续期任务记成失败 ----
+  if check_all 0; then
+    if [ "$reloaded" = 1 ]; then
+      log "✔ 热加载生效，未重启"
+    else
+      log "✔ 重启后生效"
+    fi
+    return 0
+  fi
+
+  log "✘ 重载/重启后证书仍不一致"
+  log "  多半是这个域名在 $cert_dir 下有证书，但 $conf 里没有对应的 [[tls.certificates]] 条目"
+  exit 1
+}
+
+
+# =============================================================================
+#  模式三：docker compose 重建
+# =============================================================================
+run_compose() {
+  local docker_bin compose_bin=() compose_kind="" cb
+  local compose_file="" f cmd cid state
+
+  if [ -n "$DOCKER_BIN_OVERRIDE" ]; then
+    docker_bin="$DOCKER_BIN_OVERRIDE"
+  else
+    docker_bin="$(find_bin docker || true)"
+  fi
+
+  if [ -n "$COMPOSE_BIN_OVERRIDE" ]; then
+    compose_bin=("$COMPOSE_BIN_OVERRIDE")
+    compose_kind="指定的 docker-compose"
+  elif [ -n "$docker_bin" ] && "$docker_bin" compose version >/dev/null 2>&1; then
+    compose_bin=("$docker_bin" "compose")
+    compose_kind="docker compose（v2 插件）"
+  else
+    cb="$(find_bin docker-compose || true)"
+    if [ -n "$cb" ]; then
+      compose_bin=("$cb")
+      compose_kind="docker-compose（v1 独立命令）"
+    fi
+  fi
+
+  if [ "${#compose_bin[@]}" -eq 0 ]; then
+    printf '\n  ✘ 既没找到 docker compose，也没找到 docker-compose。\n' >&2
+    printf '    systemd 触发时的 PATH 是精简过的，这是最常见的原因。两种解法：\n' >&2
+    printf '      1) 在本脚本配置区写死绝对路径（推荐）：\n' >&2
+    printf '             COMPOSE_BIN_OVERRIDE="/usr/local/bin/docker-compose"\n' >&2
+    printf '         或（用 v2 插件时）\n' >&2
+    printf '             DOCKER_BIN_OVERRIDE="/usr/bin/docker"\n' >&2
+    printf '      2) 在 /etc/systemd/system/<SSL_UNIT_NAME>.service 里补一行 Environment=PATH=...\n' >&2
+    printf '         把 docker 的安装目录加进去，然后 systemctl daemon-reload\n' >&2
+    printf '    先确认它们到底在哪：\n' >&2
+    printf '      command -v docker-compose ; command -v docker ; docker compose version\n\n' >&2
+    exit 127
+  fi
+  log "→ 使用 $compose_kind：${compose_bin[*]}"
+
+  [ -d "$COMPOSE_DIR" ] || fail "compose 项目目录不存在：$COMPOSE_DIR（改配置区的 COMPOSE_DIR）"
+  cd "$COMPOSE_DIR"
+
+  for f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+    if [ -f "$f" ]; then compose_file="$f"; break; fi
+  done
+  [ -n "$compose_file" ] || fail "$COMPOSE_DIR 下找不到 compose 文件（docker-compose.yml / compose.yml）"
+
+  # shellcheck disable=SC2206  # COMPOSE_ARGS 就是故意要按空格拆开
+  cmd=("${compose_bin[@]}" up $COMPOSE_ARGS "$COMPOSE_SERVICE")
+
+  log "→ 工作目录：$COMPOSE_DIR（$compose_file）"
+  log "→ 将执行：  ${cmd[*]}"
+
+  if [ "$DRY_RUN" = 1 ]; then
+    log "✔ dry-run：以上命令未实际执行"
+    return 0
+  fi
+
+  printf '\n'
+  "${cmd[@]}"
+
+  # ★ 校验：确认目标服务的容器真的在跑，否则让 ssl-issue.sh 看到非 0 退出码
+  #   （这样"证书换了但服务挂了"不会被记成成功）
+  cid="$("${compose_bin[@]}" ps -q "$COMPOSE_SERVICE" 2>/dev/null | head -n1 || true)"
+  if [ -z "$cid" ]; then
+    printf '\n  ! 没找到服务 %s 的容器 —— 请确认 COMPOSE_SERVICE 和 compose 文件里的服务名一致\n' \
+      "$COMPOSE_SERVICE" >&2
+    "${compose_bin[@]}" ps 2>/dev/null | sed 's/^/    /' >&2 || true
+    exit 1
+  fi
+
+  state=""
+  if [ -n "$docker_bin" ]; then
+    state="$("$docker_bin" inspect -f '{{.State.Status}}' "$cid" 2>/dev/null || true)"
+  fi
+
+  if [ -n "$state" ] && [ "$state" != "running" ]; then
+    printf '\n  ✘ 容器状态是 "%s"，不是 running。看日志排查：\n' "$state" >&2
+    printf '      %s logs --tail 50 %s\n\n' "${docker_bin:-docker}" "$cid" >&2
+    exit 1
+  fi
+
+  printf '\n'
+  log "✔ 服务 $COMPOSE_SERVICE 已重建并运行${state:+（状态 ${state}）}"
+}
+
+
+# =============================================================================
+#  分发
+# =============================================================================
+case "$RELOAD_MODE" in
+  none)
+    log "RELOAD_MODE=none —— 不做任何后置动作"
+    log "（如果本机确实不需要重载，直接删掉 renewpost.sh 更干净）"
+    ;;
+  nginx)   run_nginx ;;
+  traefik) run_traefik ;;
+  compose) run_compose ;;
+  *)
+    printf '\n  ✘ RELOAD_MODE="%s" 不认识。\n' "$RELOAD_MODE" >&2
+    printf '    只能是：none / nginx / traefik / compose（区分大小写）。\n' >&2
+    printf '    本脚本由 ssl-issue.sh 调用，返回非 0 会让这次续期记成失败。\n\n' >&2
+    exit 2
+    ;;
+esac

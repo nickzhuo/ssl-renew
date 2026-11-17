@@ -268,17 +268,24 @@ main() {
   printf '\n  %s续期后置钩子%s\n' "$C_BLD" "$C_RST"
   if [ -n "$hook_path" ] && [ -f "$hook_path" ]; then
     printf '    %s%s%s\n' "$C_GRN" "$hook_path" "$C_RST"
-    printf '    %s证书有更新时自动执行，用来重启容器 / 重启 nginx 等%s\n' "$C_DIM" "$C_RST"
+    hook_reload_mode="$(sed -n 's/^RELOAD_MODE="\(.*\)".*$/\1/p' "$hook_path" | head -n1)"
+    if [ -n "$hook_reload_mode" ]; then
+      printf '    模式 %s%s%s —— 证书有更新时自动执行\n' "$C_BLD" "$hook_reload_mode" "$C_RST"
+    else
+      printf '    %s证书有更新时自动执行，用来重启容器 / 重启 nginx 等%s\n' "$C_DIM" "$C_RST"
+      printf '    %s（没读到 RELOAD_MODE，可能是旧版模板；新版见 renewpost.sh.example）%s\n' \
+        "$C_DIM" "$C_RST"
+    fi
     printf '    %s空跑确认命令：bash %s --dry-run%s\n' "$C_DIM" "$hook_path" "$C_RST"
   elif [ -n "$hook_path" ]; then
     warn_lines+=("续期后置钩子指向的文件不存在：${hook_path}（证书更新后服务不会重载）")
     printf '    %s%s（文件不存在）%s\n' "$C_YEL" "$hook_path" "$C_RST"
   else
     printf '    %s未配置%s —— 证书更新后服务不会自动重载\n' "$C_DIM" "$C_RST"
-    printf '    模板：%s/renewpost.sh.example.docker（重启容器） 或 .example.nginx（重启 nginx）\n' \
+    printf '    模板：%s/renewpost.sh.example（顶部 RELOAD_MODE 四选一：none/nginx/traefik/compose）\n' \
       "$SSL_LIB_DIR"
-    printf '    用法：cp <模板> %s/renewpost.sh && chmod +x %s/renewpost.sh\n' \
-      "$SSL_LIB_DIR" "$SSL_LIB_DIR"
+    printf '    用法：cp %s/renewpost.sh.example %s/renewpost.sh && chmod +x %s/renewpost.sh\n' \
+      "$SSL_LIB_DIR" "$SSL_LIB_DIR" "$SSL_LIB_DIR"
   fi
 
   # ---- 运行日志（最近几次的结果摘要）----
